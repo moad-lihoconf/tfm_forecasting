@@ -99,6 +99,7 @@ Check out [tfmplayground.priors](https://github.com/automl/TFM-Playground/tree/m
 You can use tfmplayground.priors as a command-line-tool to pre-generate data from a prior, e.g. via
 ```
 python -m tfmplayground.priors --lib tabicl \
+       --prior_type mix_scm \
        --num_batches 1000 --batch_size 4 \
        --min_features 3 --max_features 3 \
        --max_seq_len 50 --max_classes 3 \
