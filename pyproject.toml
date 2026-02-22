@@ -33,7 +33,29 @@ ticl = { git = "https://github.com/microsoft/ticl.git", branch = "main" }
 tabpfn-v1-prior = { git = "https://github.com/automl/tabpfn-v1-prior.git", branch = "main" }
 wandb = { version = ">=0.20", optional = true }
 tensorboard = { version = ">=2.19", optional = true }
+pytest = "^9.0.2"
 
 [tool.poetry.extras]
 wandb = ["wandb"]
 tensorboard = ["tensorboard"]
+
+[tool.pytest.ini_options]
+addopts = "-p no:dash"
+
+[dependency-groups]
+dev = [
+    "mypy (>=1.19.1,<2.0.0)",
+    "pre-commit (>=4.5.1,<5.0.0)"
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+warn_unused_ignores = true

@@ -1,19 +1,31 @@
 """Utility functions for priors."""
 
-from typing import Union
-
 import h5py
 import numpy as np
 import torch
-from ticl.priors import GPPrior, MLPPrior, ClassificationAdapterPrior, BooleanConjunctionPrior, StepFunctionPrior
+from ticl.priors import (
+    BooleanConjunctionPrior,
+    ClassificationAdapterPrior,
+    GPPrior,
+    MLPPrior,
+    StepFunctionPrior,
+)
 from tqdm import tqdm
 
-from .config import get_ticl_prior_config, get_tabpfn_prior_config
+from .config import get_tabpfn_prior_config, get_ticl_prior_config
 
 
-def build_ticl_prior(prior_type: str, base_prior: str = None, max_num_classes: int = None) -> Union[MLPPrior, GPPrior, ClassificationAdapterPrior, BooleanConjunctionPrior, StepFunctionPrior]:
+def build_ticl_prior(
+    prior_type: str, base_prior: str = None, max_num_classes: int = None
+) -> (
+    MLPPrior
+    | GPPrior
+    | ClassificationAdapterPrior
+    | BooleanConjunctionPrior
+    | StepFunctionPrior
+):
     """Builds a TICL prior based on the prior type string using the defaults in config.py.
-    
+
     Args:
         prior_type: Type of TICL prior ('mlp', 'gp', 'classification_adapter', etc.)
         base_prior: Base regression prior for composite priors (e.g., 'mlp' or 'gp' for classification_adapter)
@@ -21,7 +33,7 @@ def build_ticl_prior(prior_type: str, base_prior: str = None, max_num_classes: i
     """
 
     cfg = get_ticl_prior_config(prior_type)
-    
+
     if prior_type == "mlp":
         return MLPPrior(cfg)
     elif prior_type == "gp":
@@ -31,7 +43,7 @@ def build_ticl_prior(prior_type: str, base_prior: str = None, max_num_classes: i
             base_prior = "mlp"  # default to MLP
         # build the base regression prior
         base_prior_obj = build_ticl_prior(base_prior)
-        
+
         # we equate them rather than treating num_classes as a separate parameter because:
         # - max_num_classes serves as the upper bound for TICL's internal sampling
         # - even with num_classes set to a constant, TICL's class_sampler_f() will internally
@@ -49,38 +61,40 @@ def build_ticl_prior(prior_type: str, base_prior: str = None, max_num_classes: i
 
 def build_tabpfn_prior(prior_type: str, max_classes: int) -> dict:
     """Builds TabPFN prior configuration with appropriate settings for regression or classification.
-        
+
     Args:
         prior_type: Type of TabPFN prior ('mlp', 'gp', 'prior_bag')
         max_classes: Maximum number of classes
-        
+
     Returns:
         dict with 'flexible', 'max_num_classes', and 'prior_config' keys
     """
     is_regression = max_classes == 0
-    
+
     return {
-        'flexible': not is_regression,  # false for regression, true for classification
-        'max_num_classes': 2 if is_regression else max_classes,  # library weirdly requires >=2 regardless of regression or classification
+        "flexible": not is_regression,  # false for regression, true for classification
+        "max_num_classes": 2
+        if is_regression
+        else max_classes,  # library weirdly requires >=2 regardless of regression or classification
         # num_classes parameter in the library code is equated to max_num_classes
         # so its not varied separately here
-        'prior_config': {
+        "prior_config": {
             **get_tabpfn_prior_config(prior_type),
         },
     }
 
 
 def dump_prior_to_h5(
-    prior, 
-    max_classes: int, 
-    batch_size: int, 
-    save_path: str, 
-    problem_type: str, 
-    max_seq_len: int, 
-    max_features: int
+    prior,
+    max_classes: int,
+    batch_size: int,
+    save_path: str,
+    problem_type: str,
+    max_seq_len: int,
+    max_features: int,
 ):
     """Dumps synthetic prior data into an HDF5 file for later training."""
-    
+
     with h5py.File(save_path, "w") as f:
         dump_X = f.create_dataset(
             "X",
@@ -90,21 +104,40 @@ def dump_prior_to_h5(
             compression="lzf",
         )
         dump_num_features = f.create_dataset(
-            "num_features", shape=(0,), maxshape=(None,), chunks=(batch_size,), dtype="i4"
+            "num_features",
+            shape=(0,),
+            maxshape=(None,),
+            chunks=(batch_size,),
+            dtype="i4",
         )
         dump_num_datapoints = f.create_dataset(
-            "num_datapoints", shape=(0,), maxshape=(None,), chunks=(batch_size,), dtype="i4"
+            "num_datapoints",
+            shape=(0,),
+            maxshape=(None,),
+            chunks=(batch_size,),
+            dtype="i4",
         )
         dump_y = f.create_dataset(
-            "y", shape=(0, max_seq_len), maxshape=(None, max_seq_len), chunks=(batch_size, max_seq_len)
+            "y",
+            shape=(0, max_seq_len),
+            maxshape=(None, max_seq_len),
+            chunks=(batch_size, max_seq_len),
         )
         dump_single_eval_pos = f.create_dataset(
-            "single_eval_pos", shape=(0,), maxshape=(None,), chunks=(batch_size,), dtype="i4"
+            "single_eval_pos",
+            shape=(0,),
+            maxshape=(None,),
+            chunks=(batch_size,),
+            dtype="i4",
         )
 
         if problem_type == "classification":
-            f.create_dataset("max_num_classes", data=np.array((max_classes,)), chunks=(1,))
-        f.create_dataset("original_batch_size", data=np.array((batch_size,)), chunks=(1,))
+            f.create_dataset(
+                "max_num_classes", data=np.array((max_classes,)), chunks=(1,)
+            )
+        f.create_dataset(
+            "original_batch_size", data=np.array((batch_size,)), chunks=(1,)
+        )
         f.create_dataset("problem_type", data=problem_type, dtype=h5py.string_dtype())
 
         for e in tqdm(prior):
@@ -116,9 +149,13 @@ def dump_prior_to_h5(
 
             # pad x and y to the maximum sequence length and number of features needed for tabicl
             x_padded = np.pad(
-                x, ((0, 0), (0, max_seq_len - x.shape[1]), (0, max_features - x.shape[2])), mode="constant"
+                x,
+                ((0, 0), (0, max_seq_len - x.shape[1]), (0, max_features - x.shape[2])),
+                mode="constant",
             )
-            y_padded = np.pad(y, ((0, 0), (0, max_seq_len - y.shape[1])), mode="constant")
+            y_padded = np.pad(
+                y, ((0, 0), (0, max_seq_len - y.shape[1])), mode="constant"
+            )
 
             dump_X.resize(dump_X.shape[0] + batch_size, axis=0)
             dump_X[-batch_size:] = x_padded
@@ -129,8 +166,12 @@ def dump_prior_to_h5(
             dump_num_features.resize(dump_num_features.shape[0] + batch_size, axis=0)
             dump_num_features[-batch_size:] = x.shape[2]
 
-            dump_num_datapoints.resize(dump_num_datapoints.shape[0] + batch_size, axis=0)
+            dump_num_datapoints.resize(
+                dump_num_datapoints.shape[0] + batch_size, axis=0
+            )
             dump_num_datapoints[-batch_size:] = x.shape[1]
 
-            dump_single_eval_pos.resize(dump_single_eval_pos.shape[0] + batch_size, axis=0)
+            dump_single_eval_pos.resize(
+                dump_single_eval_pos.shape[0] + batch_size, axis=0
+            )
             dump_single_eval_pos[-batch_size:] = single_eval_pos
