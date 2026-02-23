@@ -105,6 +105,27 @@ python -m tfmplayground.priors --lib tabicl \
        --max_seq_len 50 --max_classes 3 \
        --save_path tabicl_4k_50x3.h5
 ```
+For DynSCM forecasting prior dumps, run:
+```
+python -m tfmplayground.priors --lib dynscm \
+       --num_batches 1000 --batch_size 4 \
+       --max_seq_len 64 --max_features 128 \
+       --max_classes 0 \
+       --dynscm_override num_variables_min=4 \
+       --dynscm_override num_variables_max=8 \
+       --dynscm_override num_regimes=3 \
+       --dynscm_override mechanism_type=\"linear_var\" \
+       --save_path dynscm_4k_64x128.h5
+```
+You can optionally provide a full DynSCM JSON config and then patch fields with overrides:
+```
+python -m tfmplayground.priors --lib dynscm \
+       --num_batches 250 --batch_size 8 \
+       --max_seq_len 96 --max_features 128 \
+       --dynscm_config_json path/to/dynscm_config.json \
+       --dynscm_override features.num_kernels=2 \
+       --dynscm_override missingness.missing_mode=\"mix\"
+```
 which can afterwards be loaded via
 ```python
 from tfmplayground.priors.dataloader import PriorDumpDataLoader
@@ -127,7 +148,62 @@ You can check out `next(iter(prior))` if you want to see an example batch.
 
 Check out `prior_visualization.ipynb` for some more examples.
 
+### DynSCM: Theory to Code Mapping
+
+The DynSCM forecasting prior in `tfmplayground/priors/dynscm/` follows a direct module split:
+
+- `config.py`: all sampling knobs grouped by shape/regime/graph/mechanism/stability/noise/missingness/features/safety.
+- `graph.py`: regime-dependent causal graph sampling (contemporaneous + lagged supports).
+- `stability.py`: stable coefficient sampling and optional spectral rescaling.
+- `mechanisms.py`: linear VAR core + optional residual nonlinear mechanism block.
+- `simulate.py`: forward rollout for multivariate regime-switching time series.
+- `missingness.py`: raw observation mask generation (`off`, `mcar`, `mar`, `mnar_lite`, `mix`) with outages.
+- `features.py`: origin/horizon sampling and forecasting featurization into PFN tables.
+- `get_batch.py`: full batch assembly, feature-priority truncation, and model contract output.
+
+### DynSCM Config Knobs (High Signal)
+
+- Shape: `num_variables_min/max`, `series_length_min/max`, `train_rows_min/max`, `test_rows_min/max`, `forecast_horizons`.
+- Regime: `num_regimes`, `sticky_rho`, `shared_order`, `share_base_graph`.
+- Graph: `max_contemp_parents`, `max_lagged_parents`, edge rates/probabilities.
+- Mechanism/Stability: `mechanism_type`, `residual_num_features`, `residual_lipschitz_max`, `col_budget_min/max`.
+- Missingness: `missing_mode`, `missing_rate_min/max`, block outage controls, `add_mask_channels`.
+- Features: `max_feature_lag`, `explicit_lags`, `num_kernels`, deterministic time/season/horizon toggles.
+- Safety: `max_abs_x`, `max_resample_attempts`.
+
+### DynSCM Quickstart Commands
+
+- On-the-fly loader:
+```python
+from tfmplayground.priors import DynSCMConfig, DynSCMPriorDataLoader
+
+prior = DynSCMPriorDataLoader(
+    cfg=DynSCMConfig(),
+    num_steps=100,
+    batch_size=16,
+    num_datapoints_max=64,
+    num_features=128,
+    device="cpu",
+    seed=0,
+)
+batch = next(iter(prior))
+```
+- Dump to HDF5:
+```bash
+python -m tfmplayground.priors --lib dynscm \
+  --num_batches 500 --batch_size 8 \
+  --max_seq_len 64 --max_features 128 \
+  --max_classes 0 \
+  --save_path dynscm_dump.h5
+```
+- Train from dump:
+```python
+from tfmplayground.priors.dataloader import PriorDumpDataLoader
+prior = PriorDumpDataLoader("dynscm_dump.h5", num_steps=20, batch_size=8, device="cpu")
+```
+
 ### Supported Priors
 
 - [TabICL](https://github.com/soda-inria/tabicl) (Classification)
 - [TICL](https://github.com/microsoft/ticl) (Regression, Classification)
+- DynSCM forecasting prior (Regression)

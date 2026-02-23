@@ -1,14 +1,24 @@
 """Data loading utilities for tabular priors."""
 
 from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING
 
 import h5py
 import torch
-from tabicl.prior.dataset import PriorDataset as TabICLPriorDataset
-from ticl.dataloader import PriorDataLoader as TICLPriorDataset
-
-# import here for future use & cleaner imports/it already handles type conversions
 from torch.utils.data import DataLoader
+
+try:
+    from tabicl.prior.dataset import PriorDataset as TabICLPriorDataset
+except ModuleNotFoundError:  # pragma: no cover - optional dependency.
+    TabICLPriorDataset = None
+
+try:
+    from ticl.dataloader import PriorDataLoader as TICLPriorDataset
+except ModuleNotFoundError:  # pragma: no cover - optional dependency.
+    TICLPriorDataset = None
+
+if TYPE_CHECKING:
+    from .dynscm import DynSCMConfig
 
 
 class PriorDataLoader(DataLoader):
@@ -99,7 +109,8 @@ class PriorDumpDataLoader(DataLoader):
                 if self.pointer >= f["X"].shape[0]:
                     print(
                         """Finished iteration over all stored datasets! """
-                        """Will start reusing the same data with different splits now."""
+                        """Will start reusing the same data with different """
+                        """splits now."""
                     )
                     self.pointer = 0
 
@@ -127,7 +138,8 @@ class TabICLPriorDataLoader(DataLoader):
         min_features (int): Minimum number of features in x.
         max_features (int): Maximum number of features in x.
         max_num_classes (int): Maximum number of classes (for classification tasks).
-        prior_type (str): Type of prior: 'mlp_scm', 'tree_scm', 'mix_scm' (default), or 'dummy'.
+        prior_type (str): Type of prior: 'mlp_scm', 'tree_scm',
+            'mix_scm' (default), or 'dummy'.
         device (torch.device): Target device for tensors.
     """
 
@@ -153,6 +165,12 @@ class TabICLPriorDataLoader(DataLoader):
         self.prior_type = prior_type
         self.device = device
 
+        if TabICLPriorDataset is None:
+            raise RuntimeError(
+                "TabICL dependencies are unavailable. Install tabicl extras "
+                "to use TabICLPriorDataLoader."
+            )
+
         self.pd = TabICLPriorDataset(
             batch_size=batch_size,
             batch_size_per_gp=batch_size,
@@ -166,13 +184,10 @@ class TabICLPriorDataLoader(DataLoader):
 
     def tabicl_to_ours(self, d):
         x, y, active_features, seqlen, train_size = d
-        active_features = active_features[
-            0
-        ].item()  # should be all the same since we use batch_size_per_gp=batch_size (not true in practice!)
+        # Should match in practice for batch_size_per_gp=batch_size.
+        active_features = active_features[0].item()
         x = x[:, :, :active_features]
-        single_eval_pos = train_size[
-            0
-        ].item()  # should be all the same since we use batch_size_per_gp=batch_size
+        single_eval_pos = train_size[0].item()
         return dict(
             x=x.to(self.device),
             y=y.to(self.device),
@@ -187,6 +202,41 @@ class TabICLPriorDataLoader(DataLoader):
 
     def __len__(self):
         return self.num_steps
+
+
+class DynSCMPriorDataLoader(PriorDataLoader):
+    """DataLoader sampling DynSCM forecasting tables on-the-fly.
+
+    Args:
+        cfg: DynSCM configuration object.
+        num_steps: Number of batches per epoch.
+        batch_size: Number of functions sampled per batch.
+        num_datapoints_max: Maximum sequence length per function.
+        num_features: Number of input features.
+        device: Target device for tensors.
+        seed: Optional deterministic seed for closure RNG state.
+    """
+
+    def __init__(
+        self,
+        cfg: "DynSCMConfig",
+        num_steps: int,
+        batch_size: int,
+        num_datapoints_max: int,
+        num_features: int,
+        device: torch.device,
+        seed: int | None = None,
+    ):
+        from .dynscm import make_get_batch_dynscm
+
+        super().__init__(
+            get_batch_function=make_get_batch_dynscm(cfg, device=device, seed=seed),
+            num_steps=num_steps,
+            batch_size=batch_size,
+            num_datapoints_max=num_datapoints_max,
+            num_features=num_features,
+            device=device,
+        )
 
 
 class TICLPriorDataLoader(DataLoader):
@@ -214,6 +264,12 @@ class TICLPriorDataLoader(DataLoader):
     ):
         self.num_steps = num_steps
         self.device = device
+
+        if TICLPriorDataset is None:
+            raise RuntimeError(
+                "TICL dependencies are unavailable. Install ticl extras "
+                "to use TICLPriorDataLoader."
+            )
 
         self.pd = TICLPriorDataset(
             prior=prior,
