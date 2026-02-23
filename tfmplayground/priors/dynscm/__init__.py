@@ -6,6 +6,7 @@ from .features import (
     extract_feature_block,
     sample_origins_and_horizons,
 )
+from .get_batch import make_get_batch_dynscm
 from .graph import DynSCMGraphSample, sample_regime_graphs
 from .mechanisms import (
     DynSCMMechanismSample,
@@ -42,6 +43,7 @@ __all__ = [
     "evaluate_contemporaneous_effect",
     "evaluate_lagged_mechanism",
     "extract_feature_block",
+    "make_get_batch_dynscm",
     "project_after_drift",
     "project_to_column_budgets",
     "rescale_lag_block_to_spectral_radius",
