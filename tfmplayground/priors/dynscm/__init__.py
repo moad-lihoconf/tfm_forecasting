@@ -8,6 +8,7 @@ from .mechanisms import (
     evaluate_lagged_mechanism,
     sample_regime_mechanisms,
 )
+from .missingness import sample_observation_mask
 from .simulate import (
     DynSCMSimulationSample,
     sample_innovations,
@@ -37,6 +38,7 @@ __all__ = [
     "project_after_drift",
     "project_to_column_budgets",
     "rescale_lag_block_to_spectral_radius",
+    "sample_observation_mask",
     "sample_innovations",
     "sample_regime_path",
     "sample_regime_mechanisms",
