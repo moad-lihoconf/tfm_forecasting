@@ -59,10 +59,8 @@ def test_sample_stable_coefficients_is_seed_deterministic(dynscm_api):
     s1 = stability_mod.sample_stable_coefficients(cfg, graph, seed=19)
     s2 = stability_mod.sample_stable_coefficients(cfg, graph, seed=19)
 
-    assert np.array_equal(s1.lag_coefficients, s2.lag_coefficients)
-    assert np.array_equal(
-        s1.contemporaneous_coefficients, s2.contemporaneous_coefficients
-    )
+    assert np.array_equal(s1.lag_coeffs, s2.lag_coeffs)
+    assert np.array_equal(s1.contemp_coeffs, s2.contemp_coeffs)
     assert np.array_equal(s1.lag_column_budgets, s2.lag_column_budgets)
     assert np.array_equal(s1.contemp_column_budgets, s2.contemp_column_budgets)
 
@@ -73,8 +71,8 @@ def test_column_budget_support_and_budget_invariants(dynscm_api):
     graph = graph_mod.sample_regime_graphs(cfg, num_vars=10, seed=3)
     sample = stability_mod.sample_stable_coefficients(cfg, graph, seed=7)
 
-    assert sample.lag_coefficients.shape == graph.regime_lagged_adjacency.shape
-    assert sample.contemporaneous_coefficients.shape == (
+    assert sample.lag_coeffs.shape == graph.regime_lagged_adjacency.shape
+    assert sample.contemp_coeffs.shape == (
         cfg.num_regimes,
         10,
         10,
@@ -82,15 +80,14 @@ def test_column_budget_support_and_budget_invariants(dynscm_api):
 
     tol = 1e-8
     assert not (
-        (~graph.regime_lagged_adjacency) & (np.abs(sample.lag_coefficients) > tol)
+        (~graph.regime_lagged_adjacency) & (np.abs(sample.lag_coeffs) > tol)
     ).any()
     assert not (
-        (~graph.regime_contemporaneous_adjacency)
-        & (np.abs(sample.contemporaneous_coefficients) > tol)
+        (~graph.regime_contemp_adjacency) & (np.abs(sample.contemp_coeffs) > tol)
     ).any()
 
-    lag_l1 = np.sum(np.abs(sample.lag_coefficients), axis=(1, 2))
-    cont_l1 = np.sum(np.abs(sample.contemporaneous_coefficients), axis=1)
+    lag_l1 = np.sum(np.abs(sample.lag_coeffs), axis=(1, 2))
+    cont_l1 = np.sum(np.abs(sample.contemp_coeffs), axis=1)
     assert np.all(lag_l1 <= sample.lag_column_budgets + tol)
     assert np.all(cont_l1 <= sample.contemp_column_budgets + tol)
 
@@ -103,10 +100,8 @@ def test_spectral_rescale_lag_block_reduces_radius(dynscm_api):
     lag[0, 1, 1] = 1.4
 
     rho_before = stability_mod.companion_spectral_radius(lag)
-    lag_rescaled, scale, rho_after = (
-        stability_mod.rescale_lag_block_to_spectral_radius(
-            lag, spectral_radius_cap=0.95
-        )
+    lag_rescaled, scale, rho_after = stability_mod.rescale_lag_block_to_spectral_radius(
+        lag, spectral_radius_cap=0.95
     )
 
     assert rho_before > 0.95

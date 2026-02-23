@@ -90,19 +90,17 @@ def test_graph_sampling_is_seed_deterministic(dynscm_api):
     sample_one = sample_regime_graphs(cfg, num_vars=8, seed=17)
     sample_two = sample_regime_graphs(cfg, num_vars=8, seed=17)
 
+    assert np.array_equal(sample_one.regime_topo_orders, sample_two.regime_topo_orders)
     assert np.array_equal(
-        sample_one.regime_topological_orders, sample_two.regime_topological_orders
-    )
-    assert np.array_equal(
-        sample_one.base_contemporaneous_adjacency,
-        sample_two.base_contemporaneous_adjacency,
+        sample_one.base_contemp_adjacency,
+        sample_two.base_contemp_adjacency,
     )
     assert np.array_equal(
         sample_one.base_lagged_adjacency, sample_two.base_lagged_adjacency
     )
     assert np.array_equal(
-        sample_one.regime_contemporaneous_adjacency,
-        sample_two.regime_contemporaneous_adjacency,
+        sample_one.regime_contemp_adjacency,
+        sample_two.regime_contemp_adjacency,
     )
     assert np.array_equal(
         sample_one.regime_lagged_adjacency, sample_two.regime_lagged_adjacency
@@ -115,8 +113,8 @@ def test_graph_invariants_respected(dynscm_api):
     cfg = dynscm_config()
     sample = sample_regime_graphs(cfg, num_vars=10, seed=5)
 
-    assert sample.regime_topological_orders.shape == (cfg.num_regimes, 10)
-    assert sample.regime_contemporaneous_adjacency.shape == (cfg.num_regimes, 10, 10)
+    assert sample.regime_topo_orders.shape == (cfg.num_regimes, 10)
+    assert sample.regime_contemp_adjacency.shape == (cfg.num_regimes, 10, 10)
     assert sample.regime_lagged_adjacency.shape == (
         cfg.num_regimes,
         cfg.max_lag,
@@ -125,9 +123,9 @@ def test_graph_invariants_respected(dynscm_api):
     )
 
     for regime_idx in range(cfg.num_regimes):
-        order = sample.regime_topological_orders[regime_idx]
+        order = sample.regime_topo_orders[regime_idx]
         positions = _order_positions(order)
-        contemporaneous = sample.regime_contemporaneous_adjacency[regime_idx]
+        contemporaneous = sample.regime_contemp_adjacency[regime_idx]
 
         for source, target in np.argwhere(contemporaneous):
             assert positions[source] < positions[target]
@@ -151,5 +149,5 @@ def test_no_contemporaneous_mode_produces_no_contemporaneous_edges(dynscm_api):
     cfg = dynscm_config(use_contemp_edges=False, share_base_graph=False)
     sample = sample_regime_graphs(cfg, num_vars=9, seed=23)
 
-    assert not sample.base_contemporaneous_adjacency.any()
-    assert not sample.regime_contemporaneous_adjacency.any()
+    assert not sample.base_contemp_adjacency.any()
+    assert not sample.regime_contemp_adjacency.any()

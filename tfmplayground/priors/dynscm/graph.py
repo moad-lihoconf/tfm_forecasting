@@ -28,21 +28,21 @@ type ParentsByRegime = tuple[RegimeParents, ...]
 
 @dataclass(frozen=True, slots=True)
 class DynSCMGraphSample:
-    regime_topological_orders: RegimeOrders
-    shared_topological_order: SharedOrder
-    base_contemporaneous_adjacency: Adj2D
+    regime_topo_orders: RegimeOrders
+    shared_topo_order: SharedOrder
+    base_contemp_adjacency: Adj2D
     base_lagged_adjacency: LagAdj3D
-    regime_contemporaneous_adjacency: RegimeAdj3D
+    regime_contemp_adjacency: RegimeAdj3D
     regime_lagged_adjacency: RegimeLagAdj4D
     regime_parent_sets: ParentsByRegime
 
     @property
     def num_regimes(self) -> int:
-        return self.regime_topological_orders.shape[0]
+        return self.regime_topo_orders.shape[0]
 
     @property
     def num_vars(self) -> int:
-        return self.regime_topological_orders.shape[1]
+        return self.regime_topo_orders.shape[1]
 
     @property
     def max_lag(self) -> int:
@@ -65,16 +65,16 @@ def sample_regime_graphs(
         )
 
     rng = cfg.make_rng(seed)
-    regime_topological_orders, shared_topological_order = _sample_orders(
+    regime_topo_orders, shared_topo_order = _sample_orders(
         num_vars=num_vars,
         num_regimes=cfg.num_regimes,
         shared=cfg.shared_order,
         rng=rng,
     )
 
-    base_contemporaneous_adjacency = _sample_contemporaneous(
+    base_contemp_adjacency = _sample_contemporaneous(
         num_vars=num_vars,
-        order=shared_topological_order,
+        order=shared_topo_order,
         use_contemp_edges=cfg.use_contemp_edges,
         parent_rate=cfg.contemp_parent_rate,
         max_parents=cfg.max_contemp_parents,
@@ -90,7 +90,7 @@ def sample_regime_graphs(
         rng=rng,
     )
 
-    regime_contemporaneous_adjacency = np.zeros(
+    regime_contemp_adjacency = np.zeros(
         (cfg.num_regimes, num_vars, num_vars), dtype=bool
     )
     regime_lagged_adjacency = np.zeros(
@@ -98,10 +98,10 @@ def sample_regime_graphs(
     )
 
     for regime_idx in range(cfg.num_regimes):
-        regime_topological_order = regime_topological_orders[regime_idx]
+        regime_topological_order = regime_topo_orders[regime_idx]
 
         if cfg.share_base_graph:
-            regime_contemp = base_contemporaneous_adjacency.copy()
+            regime_contemp = base_contemp_adjacency.copy()
             regime_lagged = base_lagged_adjacency.copy()
         else:
             regime_contemp = _sample_contemporaneous(
@@ -139,12 +139,12 @@ def sample_regime_graphs(
             rng=rng,
         )
 
-        regime_contemporaneous_adjacency[regime_idx] = regime_contemp
+        regime_contemp_adjacency[regime_idx] = regime_contemp
         regime_lagged_adjacency[regime_idx] = regime_lagged
 
     _validate_graph_arrays(
-        orders=regime_topological_orders,
-        contemp_by_regime=regime_contemporaneous_adjacency,
+        orders=regime_topo_orders,
+        contemp_by_regime=regime_contemp_adjacency,
         lagged_by_regime=regime_lagged_adjacency,
         use_contemp_edges=cfg.use_contemp_edges,
         max_contemp_parents=cfg.max_contemp_parents,
@@ -152,15 +152,15 @@ def sample_regime_graphs(
     )
 
     regime_parent_sets = _build_parent_lists(
-        regime_contemporaneous_adjacency, regime_lagged_adjacency
+        regime_contemp_adjacency, regime_lagged_adjacency
     )
 
     return DynSCMGraphSample(
-        regime_topological_orders=regime_topological_orders,
-        shared_topological_order=shared_topological_order,
-        base_contemporaneous_adjacency=base_contemporaneous_adjacency,
+        regime_topo_orders=regime_topo_orders,
+        shared_topo_order=shared_topo_order,
+        base_contemp_adjacency=base_contemp_adjacency,
         base_lagged_adjacency=base_lagged_adjacency,
-        regime_contemporaneous_adjacency=regime_contemporaneous_adjacency,
+        regime_contemp_adjacency=regime_contemp_adjacency,
         regime_lagged_adjacency=regime_lagged_adjacency,
         regime_parent_sets=regime_parent_sets,
     )
@@ -249,9 +249,7 @@ def _sample_lagged(
 
         for target in range(num_vars):
             max_parents_for_target = min(max_parents, num_vars)
-            parent_count = _sample_truncated_poisson(
-                rng, lam, max_parents_for_target
-            )
+            parent_count = _sample_truncated_poisson(rng, lam, max_parents_for_target)
             if parent_count == 0:
                 continue
 
