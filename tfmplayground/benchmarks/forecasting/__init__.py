@@ -1,20 +1,18 @@
-from .benchmarks.forecasting import (
+"""Forecasting benchmark package for DynSCM research validation."""
+
+from .config import ForecastBenchmarkConfig
+from .datasets import DatasetBundle, load_suite
+from .runner import (
     BenchmarkArtifacts,
-    DatasetBundle,
-    ForecastBenchmarkConfig,
     evaluate_proxy,
     evaluate_regression,
-    load_suite,
     run_benchmark,
 )
-from .interface import NanoTabPFNClassifier, NanoTabPFNRegressor
 
 __all__ = [
     "BenchmarkArtifacts",
     "DatasetBundle",
     "ForecastBenchmarkConfig",
-    "NanoTabPFNClassifier",
-    "NanoTabPFNRegressor",
     "evaluate_proxy",
     "evaluate_regression",
     "load_suite",

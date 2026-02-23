@@ -1,20 +1,17 @@
-from .benchmarks.forecasting import (
+"""Benchmarking utilities."""
+
+from .forecasting import (
     BenchmarkArtifacts,
-    DatasetBundle,
     ForecastBenchmarkConfig,
     evaluate_proxy,
     evaluate_regression,
     load_suite,
     run_benchmark,
 )
-from .interface import NanoTabPFNClassifier, NanoTabPFNRegressor
 
 __all__ = [
     "BenchmarkArtifacts",
-    "DatasetBundle",
     "ForecastBenchmarkConfig",
-    "NanoTabPFNClassifier",
-    "NanoTabPFNRegressor",
     "evaluate_proxy",
     "evaluate_regression",
     "load_suite",

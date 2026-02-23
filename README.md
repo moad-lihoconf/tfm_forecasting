@@ -50,7 +50,7 @@ This should take less than 5 min on a modern NVIDIA GPU (around 10 minutes on Ma
 
 We also offer a pre-generated dataset containing 1.28M tables with 50 datapoints and 3 features each for regression [here](https://ml.informatik.uni-freiburg.de/research-artifacts/pfefferle/TFM-Playground/50x3_1280k_regression.h5).
 
-You can pretrain on it using `python pretrain_regressor.py`.
+You can pretrain on it using `python pretrain_regression.py`.
 
 #### Step by Step Explanation (Classifier)
 
@@ -201,6 +201,46 @@ python -m tfmplayground.priors --lib dynscm \
 from tfmplayground.priors.dataloader import PriorDumpDataLoader
 prior = PriorDumpDataLoader("dynscm_dump.h5", num_steps=20, batch_size=8, device="cpu")
 ```
+
+### Forecast Research Validation (DynSCM vs Baselines)
+
+The forecasting benchmark package lives in `tfmplayground/benchmarks/forecasting/` and provides:
+
+- dataset loading with deterministic cache under `workdir/forecast_data/`,
+- leakage-safe rolling-origin splits,
+- shared featurization for all models (DynSCM feature builder wrapper),
+- baseline adapters (nanoTabPFN standard + DynSCM-trained + TabICL),
+- proxy classification track (NanoTabPFN classifier + TabICL classifier + NICL API),
+- statistical summary with win-rate and bootstrap confidence intervals.
+
+Quickstart benchmark command:
+```bash
+python -m tfmplayground.benchmarks.forecasting \
+  --mode both \
+  --model_standard_ckpt nanotabpfn_weights.pth \
+  --model_standard_dist nanotabpfn_buckets.pth \
+  --model_dynscm_ckpt workdir/forecast_research/nanotabpfn_dynscm_weights.pth \
+  --model_dynscm_dist workdir/forecast_research/nanotabpfn_dynscm_buckets.pth \
+  --output_dir workdir/forecast_results
+```
+
+One-command reproducibility script:
+```bash
+bash scripts/run_forecast_research.sh
+```
+This script executes:
+1. DynSCM prior dump generation.
+2. DynSCM fine-tuning of nanoTabPFN.
+3. Proxy benchmark run (NICL used if `NICL_API_TOKEN` is set).
+4. Combined regression + proxy benchmark run with final report generation.
+
+Generated artifacts:
+
+- `workdir/forecast_results/regression_rows.csv`
+- `workdir/forecast_results/regression_summary.json`
+- `workdir/forecast_results/proxy_rows.csv`
+- `workdir/forecast_results/proxy_summary.json`
+- `workdir/forecast_results/report.md`
 
 ### Supported Priors
 
