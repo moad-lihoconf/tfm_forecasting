@@ -131,7 +131,7 @@ class EvaluationLoggerCallback(ConsoleLoggerCallback):
         regressor = NanoTabPFNRegressor(model, dist, device)
         predictions = get_openml_predictions(model=regressor, tasks=self.tasks)
         scores = []
-        for dataset_name, (y_true, y_pred, _) in predictions.items():
+        for _dataset_name, (y_true, y_pred, _) in predictions.items():
             scores.append(r2_score(y_true, y_pred))
         avg_score = sum(scores) / len(scores)
         print(

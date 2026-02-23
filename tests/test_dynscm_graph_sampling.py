@@ -60,20 +60,27 @@ def test_config_from_dict_coerces_tuples_and_rng_is_deterministic(dynscm_api):
 
     cfg = dynscm_config.from_dict(
         {
-            "horizon_choices": [1, 3, 6],
+            "forecast_horizons": [1, 3, 6],
             "explicit_lags": [0, 1, 2],
             "season_period_choices": [7, 30],
             "random_seed": 13,
         }
     )
 
-    assert cfg.horizon_choices == (1, 3, 6)
+    assert cfg.forecast_horizons == (1, 3, 6)
     assert cfg.explicit_lags == (0, 1, 2)
     assert cfg.season_period_choices == (7, 30)
 
     first_draw = cfg.make_rng().integers(0, 1000, size=8)
     second_draw = cfg.make_rng().integers(0, 1000, size=8)
     assert np.array_equal(first_draw, second_draw)
+
+
+def test_legacy_shape_keys_are_rejected(dynscm_api):
+    dynscm_config, _ = dynscm_api
+
+    with pytest.raises(ValueError):
+        dynscm_config.from_dict({"horizon_choices": [1, 3, 6]})
 
 
 def test_graph_sampling_is_seed_deterministic(dynscm_api):

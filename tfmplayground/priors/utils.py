@@ -16,7 +16,7 @@ from .config import get_tabpfn_prior_config, get_ticl_prior_config
 
 
 def build_ticl_prior(
-    prior_type: str, base_prior: str = None, max_num_classes: int = None
+    prior_type: str, base_prior: str | None = None, max_num_classes: int | None = None
 ) -> (
     MLPPrior
     | GPPrior

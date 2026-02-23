@@ -24,43 +24,47 @@ class _FrozenConfigModel(BaseModel):
 class DynSCMShapeConfig(_FrozenConfigModel):
     """Shape knobs for sampled tasks."""
 
-    p_raw_min: int = Field(default=4, ge=2)
-    p_raw_max: int = Field(default=24)
-    t_min: int = Field(default=96, ge=8)
-    t_max: int = Field(default=384)
+    num_variables_min: int = Field(default=4, ge=2)
+    num_variables_max: int = Field(default=24)
+    series_length_min: int = Field(default=96, ge=8)
+    series_length_max: int = Field(default=384)
     max_lag: int = Field(default=16, ge=1)
-    n_train_min: int = Field(default=16, ge=1)
-    n_train_max: int = Field(default=48)
-    n_test_min: int = Field(default=8, ge=1)
-    n_test_max: int = Field(default=24)
-    horizon_choices: tuple[int, ...] = (1, 2, 3, 5, 10)
+    train_rows_min: int = Field(default=16, ge=1)
+    train_rows_max: int = Field(default=48)
+    test_rows_min: int = Field(default=8, ge=1)
+    test_rows_max: int = Field(default=24)
+    forecast_horizons: tuple[int, ...] = (1, 2, 3, 5, 10)
 
-    @field_validator("horizon_choices")
+    @field_validator("forecast_horizons")
     @classmethod
-    def _check_horizon_choices(cls, v: tuple[int, ...]) -> tuple[int, ...]:
+    def _check_forecast_horizons(cls, v: tuple[int, ...]) -> tuple[int, ...]:
         if not v:
-            raise ValueError("horizon_choices must be non-empty.")
+            raise ValueError("forecast_horizons must be non-empty.")
         if min(v) <= 0:
-            raise ValueError("horizon_choices must contain positive integers.")
+            raise ValueError("forecast_horizons must contain positive integers.")
         return v
 
     @model_validator(mode="after")
     def _cross_validate(self) -> DynSCMShapeConfig:
         errors = []
 
-        if self.p_raw_max < self.p_raw_min:
-            errors.append("p_raw_max must be >= p_raw_min.")
-        if self.t_max < self.t_min:
-            errors.append("t_max must be >= t_min.")
-        if self.n_train_max < self.n_train_min:
-            errors.append("n_train_max must be >= n_train_min.")
-        if self.n_test_max < self.n_test_min:
-            errors.append("n_test_max must be >= n_test_min.")
+        if self.num_variables_max < self.num_variables_min:
+            errors.append("num_variables_max must be >= num_variables_min.")
+        if self.series_length_max < self.series_length_min:
+            errors.append("series_length_max must be >= series_length_min.")
+        if self.train_rows_max < self.train_rows_min:
+            errors.append("train_rows_max must be >= train_rows_min.")
+        if self.test_rows_max < self.test_rows_min:
+            errors.append("test_rows_max must be >= test_rows_min.")
 
-        max_horizon = max(self.horizon_choices)
-        if self.n_train_max + self.n_test_max > self.t_min - max_horizon - 1:
+        max_horizon = max(self.forecast_horizons)
+        if (
+            self.train_rows_max + self.test_rows_max
+            > self.series_length_min - max_horizon - 1
+        ):
             errors.append(
-                "n_train_max + n_test_max exceeds feasible minimum timeline budget for t_min."
+                "train_rows_max + test_rows_max exceeds feasible minimum "
+                "timeline budget for series_length_min."
             )
 
         if errors:
@@ -267,7 +271,8 @@ class DynSCMConfig(_FrozenConfigModel):
                     continue
                 if section_payload is not None and field_name in section_payload:
                     raise ValueError(
-                        f"Received both flat and nested values for '{field_name}' in section '{section_name}'."
+                        "Received both flat and nested values for "
+                        f"'{field_name}' in section '{section_name}'."
                     )
                 if section_payload is None:
                     section_payload = {}
@@ -280,8 +285,8 @@ class DynSCMConfig(_FrozenConfigModel):
     def _cross_validate(self) -> DynSCMConfig:
         errors = []
 
-        if self.features.l_max_feature > self.shape.t_min - 2:
-            errors.append("l_max_feature must be <= t_min - 2.")
+        if self.features.l_max_feature > self.shape.series_length_min - 2:
+            errors.append("l_max_feature must be <= series_length_min - 2.")
         if (
             self.regime.share_base_graph
             and not self.regime.shared_order

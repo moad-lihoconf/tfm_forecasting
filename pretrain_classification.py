@@ -115,7 +115,7 @@ class ToyEvaluationLoggerCallback(ConsoleLoggerCallback):
         classifier = NanoTabPFNClassifier(model, device)
         predictions = get_openml_predictions(model=classifier, tasks=self.tasks)
         scores = []
-        for dataset_name, (y_true, y_pred, y_proba) in predictions.items():
+        for _dataset_name, (y_true, y_pred, _y_proba) in predictions.items():
             scores.append(accuracy_score(y_true, y_pred))
         avg_score = sum(scores) / len(scores)
         print(
@@ -136,7 +136,7 @@ class ProductionEvaluationLoggerCallback(WandbLoggerCallback):
             model=classifier, classification=True, tasks=TABARENA_TASKS
         )
         scores = []
-        for dataset_name, (y_true, y_pred, y_proba) in predictions.items():
+        for _dataset_name, (y_true, _y_pred, y_proba) in predictions.items():
             scores.append(roc_auc_score(y_true, y_proba, multi_class="ovr"))
         avg_score = sum(scores) / len(scores)
         self.wandb.log(

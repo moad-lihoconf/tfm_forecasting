@@ -125,6 +125,7 @@ class NanoTabPFNClassifier:
                     f.write(response.content)
         if isinstance(model, str):
             model = init_model_from_state_dict_file(model)
+        assert isinstance(model, NanoTabPFNModel)
         self.model = model.to(device)
         self.device = device
         self.num_mem_chunks = num_mem_chunks
@@ -202,6 +203,7 @@ class NanoTabPFNRegressor:
             bucket_edges = torch.load(dist, map_location=device)
             dist = FullSupportBarDistribution(bucket_edges).float()
 
+        assert isinstance(model, NanoTabPFNModel)
         self.model = model.to(device)
         self.device = device
         self.dist = dist

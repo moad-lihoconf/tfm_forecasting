@@ -3,34 +3,41 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Annotated
 
 import numpy as np
+import numpy.typing as npt
 
 from .config import DynSCMConfig
 
-ParentsByRegime = tuple[tuple[tuple[tuple[int, int], ...], ...], ...]
+type Int64Arr = npt.NDArray[np.int64]
+type BoolArr = npt.NDArray[np.bool_]
+
+type RegimeOrders = Annotated[Int64Arr, "shape=(K,p)"]
+type SharedOrder = Annotated[Int64Arr, "shape=(p,)"]
+type Adj2D = Annotated[BoolArr, "shape=(p,p)"]
+type LagAdj3D = Annotated[BoolArr, "shape=(L,p,p)"]
+type RegimeAdj3D = Annotated[BoolArr, "shape=(K,p,p)"]
+type RegimeLagAdj4D = Annotated[BoolArr, "shape=(K,L,p,p)"]
+
+type Parent = tuple[int, int]  # (source, lag)
+type NodeParents = tuple[Parent, ...]
+type RegimeParents = tuple[NodeParents, ...]
+type ParentsByRegime = tuple[RegimeParents, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class DynSCMGraphSample:
-    """Container for base and per-regime dynamic graph structures."""
-
     num_vars: int
     num_regimes: int
     max_lag: int
-    regime_topological_orders: np.ndarray  # (K, p), one topological order per regime.
-    shared_topological_order: np.ndarray  # (p,), shared topological order template.
-    base_contemporaneous_adjacency: np.ndarray  # (p, p), base within-time adjacency.
-    base_lagged_adjacency: np.ndarray  # (L, p, p), base lagged adjacency by lag.
-    regime_contemporaneous_adjacency: (
-        np.ndarray
-    )  # (K, p, p), within-time adjacency by regime.
-    regime_lagged_adjacency: (
-        np.ndarray
-    )  # (K, L, p, p), lagged adjacency by regime and lag.
-    regime_parent_sets: (
-        ParentsByRegime  # Parent sets by regime/target as (source, lag).
-    )
+    regime_topological_orders: RegimeOrders
+    shared_topological_order: SharedOrder
+    base_contemporaneous_adjacency: Adj2D
+    base_lagged_adjacency: LagAdj3D
+    regime_contemporaneous_adjacency: RegimeAdj3D
+    regime_lagged_adjacency: RegimeLagAdj4D
+    regime_parent_sets: ParentsByRegime
 
 
 def sample_regime_graphs(
@@ -41,9 +48,11 @@ def sample_regime_graphs(
 ) -> DynSCMGraphSample:
     """Sample regime-specific graphs using a base template and sparse edge flips."""
 
-    if not cfg.p_raw_min <= num_vars <= cfg.p_raw_max:
+    if not cfg.num_variables_min <= num_vars <= cfg.num_variables_max:
         raise ValueError(
-            f"num_vars={num_vars} is outside configured range [{cfg.p_raw_min}, {cfg.p_raw_max}]."
+            "num_vars="
+            f"{num_vars} is outside configured range "
+            f"[{cfg.num_variables_min}, {cfg.num_variables_max}]."
         )
 
     rng = cfg.make_rng(seed)

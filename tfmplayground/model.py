@@ -296,7 +296,7 @@ class TransformerEncoderLayer(nn.Module):
         return src
 
 
-def memory_chunking(num_mem_chunks: int) -> callable:
+def memory_chunking(num_mem_chunks: int) -> Callable[..., Callable]:
     """
     This decorator will split the first dimension of the input into chunks and apply the wrapped function
     to each chunk separately.
@@ -314,7 +314,7 @@ def memory_chunking(num_mem_chunks: int) -> callable:
             elif torch.is_grad_enabled():
                 warnings.warn(
                     "Memory chunking is disabled since gradient computation is enabled to avoid incorrect gradients. "
-                    "Please use `with torch.no_grad():` during inference to enable chunking."
+                    "Please use `with torch.no_grad():` during inference to enable chunking.", stacklevel=2
                 )
                 return func(x)
             chunk_size = max(1, math.ceil(x.shape[0] / num_mem_chunks))

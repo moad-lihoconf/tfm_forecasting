@@ -4,7 +4,7 @@ from .dataloader import (
     PriorDataLoader,
     PriorDumpDataLoader,
     TabICLPriorDataLoader,
-    TabPFNPriorDataLoader,
+    TabPFNPriorDataLoader,  # type: ignore[attr-defined]
     TICLPriorDataLoader,
 )
 from .utils import build_tabpfn_prior, build_ticl_prior
