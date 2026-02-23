@@ -15,7 +15,7 @@ class DynSCMStabilitySample:
     """Sampled stable coefficients coupled to a DynSCM regime graph."""
 
     lag_coefficients: np.ndarray  # (K, L, p, p), source->target coefficients.
-    contemporaneous_coefficients: np.ndarray  # (K, p, p), source->target coefficients.
+    contemp_coeffs: np.ndarray  # (K, p, p), source->target coefficients.
     lag_column_budgets: np.ndarray  # (K, p), per-target budgets for lag edges.
     contemp_column_budgets: np.ndarray  # (K, p), per-target budgets for cont. edges.
     spectral_rescale_factors: np.ndarray  # (K,), multiplicative lag rescale factors.
@@ -50,7 +50,7 @@ def sample_stable_coefficients(
     lag_coefficients = np.zeros(
         (num_regimes, max_lag, num_vars, num_vars), dtype=np.float64
     )
-    contemporaneous_coefficients = np.zeros(
+    contemp_coeffs = np.zeros(
         (num_regimes, num_vars, num_vars), dtype=np.float64
     )
     lag_column_budgets = np.zeros((num_regimes, num_vars), dtype=np.float64)
@@ -91,7 +91,7 @@ def sample_stable_coefficients(
             lag_spectral_radii[regime_idx] = companion_spectral_radius(lag_block)
 
         lag_coefficients[regime_idx] = lag_block
-        contemporaneous_coefficients[regime_idx] = cont_block
+        contemp_coeffs[regime_idx] = cont_block
         lag_column_budgets[regime_idx] = lag_budget
         contemp_column_budgets[regime_idx] = cont_budget
 
@@ -99,7 +99,7 @@ def sample_stable_coefficients(
         cfg=cfg,
         graph_sample=graph_sample,
         lag_coefficients=lag_coefficients,
-        contemporaneous_coefficients=contemporaneous_coefficients,
+        contemp_coeffs=contemp_coeffs,
         lag_column_budgets=lag_column_budgets,
         contemp_column_budgets=contemp_column_budgets,
         lag_spectral_radii=lag_spectral_radii,
@@ -107,7 +107,7 @@ def sample_stable_coefficients(
 
     return DynSCMStabilitySample(
         lag_coefficients=lag_coefficients,
-        contemporaneous_coefficients=contemporaneous_coefficients,
+        contemp_coeffs=contemp_coeffs,
         lag_column_budgets=lag_column_budgets,
         contemp_column_budgets=contemp_column_budgets,
         spectral_rescale_factors=spectral_rescale_factors,
@@ -265,7 +265,7 @@ def _validate_stability_sample(
     cfg: DynSCMConfig,
     graph_sample: DynSCMGraphSample,
     lag_coefficients: np.ndarray,
-    contemporaneous_coefficients: np.ndarray,
+    contemp_coeffs: np.ndarray,
     lag_column_budgets: np.ndarray,
     contemp_column_budgets: np.ndarray,
     lag_spectral_radii: np.ndarray,
@@ -278,17 +278,17 @@ def _validate_stability_sample(
         raise RuntimeError(
             f"lag_coefficients shape {lag_coefficients.shape} != {expected_lag_shape}"
         )
-    if contemporaneous_coefficients.shape != expected_cont_shape:
+    if contemp_coeffs.shape != expected_cont_shape:
         raise RuntimeError(
             "contemporaneous_coefficients shape "
-            f"{contemporaneous_coefficients.shape} != {expected_cont_shape}"
+            f"{contemp_coeffs.shape} != {expected_cont_shape}"
         )
 
     off_support_lag = (~graph_sample.regime_lagged_adjacency) & (
         np.abs(lag_coefficients) > tol
     )
     off_support_cont = (~graph_sample.regime_contemporaneous_adjacency) & (
-        np.abs(contemporaneous_coefficients) > tol
+        np.abs(contemp_coeffs) > tol
     )
     if off_support_lag.any():
         raise RuntimeError(
@@ -301,7 +301,7 @@ def _validate_stability_sample(
         )
 
     lag_l1 = np.sum(np.abs(lag_coefficients), axis=(1, 2))
-    cont_l1 = np.sum(np.abs(contemporaneous_coefficients), axis=1)
+    cont_l1 = np.sum(np.abs(contemp_coeffs), axis=1)
     if np.any(lag_l1 > lag_column_budgets + tol):
         raise RuntimeError("Lag L1 budgets violated.")
     if np.any(cont_l1 > contemp_column_budgets + tol):
