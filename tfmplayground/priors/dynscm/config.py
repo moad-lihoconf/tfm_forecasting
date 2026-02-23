@@ -85,17 +85,17 @@ class DynSCMRegimeConfig(_FrozenConfigModel):
 class DynSCMGraphConfig(_FrozenConfigModel):
     """Graph sparsity and temporal dynamics knobs."""
 
-    use_contemporaneous: bool = True
-    dmax_0: int = Field(default=3, ge=0)
-    dmax_lag: int = Field(default=2, ge=0)
-    lambda_0: float = Field(default=1.2, ge=0.0)
-    lambda_lag: float = Field(default=1.5, ge=0.0)
-    base_lag_prob: float = Field(default=0.25, ge=0.0, le=1.0)
-    lag_decay_gamma: float = Field(default=0.35, ge=0.0)
-    q_add_0: float = Field(default=0.02, ge=0.0, le=1.0)
-    q_del_0: float = Field(default=0.02, ge=0.0, le=1.0)
-    q_add_lag: float = Field(default=0.03, ge=0.0, le=1.0)
-    q_del_lag: float = Field(default=0.03, ge=0.0, le=1.0)
+    use_contemp_edges: bool = True
+    max_contemp_parents: int = Field(default=3, ge=0)
+    max_lagged_parents: int = Field(default=2, ge=0)
+    contemp_parent_rate: float = Field(default=1.2, ge=0.0)
+    lagged_parent_rate: float = Field(default=1.5, ge=0.0)
+    base_lagged_edge_prob: float = Field(default=0.25, ge=0.0, le=1.0)
+    lagged_edge_decay_rate: float = Field(default=0.35, ge=0.0)
+    contemp_edge_add_prob: float = Field(default=0.02, ge=0.0, le=1.0)
+    contemp_edge_del_prob: float = Field(default=0.02, ge=0.0, le=1.0)
+    lagged_edge_add_prob: float = Field(default=0.03, ge=0.0, le=1.0)
+    lagged_edge_del_prob: float = Field(default=0.03, ge=0.0, le=1.0)
 
 
 class DynSCMMechanismConfig(_FrozenConfigModel):
@@ -109,14 +109,14 @@ class DynSCMMechanismConfig(_FrozenConfigModel):
 
 
 class DynSCMStabilityConfig(_FrozenConfigModel):
-    """Stability guard configuration."""
+    """Stability constraint configuration."""
 
-    stability_mode: Literal["guardA"] = "guardA"
+    stability_mode: Literal["column_budget"] = "column_budget"
     col_budget_min: float = Field(default=0.35, gt=0.0, lt=1.0)
     col_budget_max: float = Field(default=0.85, gt=0.0, lt=1.0)
     contemp_budget_max: float = Field(default=0.25, ge=0.0, lt=1.0)
-    enable_guardc_rescale: bool = False
-    guardc_delta: float = Field(default=0.95, gt=0.0, lt=1.0)
+    enable_spectral_rescale: bool = False
+    spectral_radius_cap: float = Field(default=0.95, gt=0.0, lt=1.0)
 
     @model_validator(mode="after")
     def _cross_validate(self) -> DynSCMStabilityConfig:
@@ -172,7 +172,7 @@ class DynSCMMissingnessConfig(_FrozenConfigModel):
 class DynSCMFeatureConfig(_FrozenConfigModel):
     """Feature extraction knobs."""
 
-    l_max_feature: int = Field(default=32, ge=1)
+    max_feature_lag: int = Field(default=32, ge=1)
     explicit_lags: tuple[int, ...] = (0, 1, 2, 5, 10)
     num_kernels: int = Field(default=3, ge=0)
     kernel_family: Literal["exp_decay", "power_law", "mix"] = "mix"
@@ -195,8 +195,8 @@ class DynSCMFeatureConfig(_FrozenConfigModel):
     def _cross_validate(self) -> DynSCMFeatureConfig:
         errors = []
 
-        if self.l_max_feature < max(self.explicit_lags):
-            errors.append("l_max_feature must be >= max(explicit_lags).")
+        if self.max_feature_lag < max(self.explicit_lags):
+            errors.append("max_feature_lag must be >= max(explicit_lags).")
         if self.add_seasonality:
             if not self.season_period_choices:
                 errors.append(
@@ -216,7 +216,7 @@ class DynSCMSafetyConfig(_FrozenConfigModel):
     max_resample_attempts: int = Field(default=8, ge=1)
 
 
-_SECTION_MODELS: dict[str, type[_FrozenConfigModel]] = {
+_CONFIG_GROUP_MODELS: dict[str, type[_FrozenConfigModel]] = {
     "shape": DynSCMShapeConfig,
     "regime": DynSCMRegimeConfig,
     "graph": DynSCMGraphConfig,
@@ -228,11 +228,11 @@ _SECTION_MODELS: dict[str, type[_FrozenConfigModel]] = {
     "safety": DynSCMSafetyConfig,
 }
 
-_FLAT_FIELD_TO_SECTION: dict[str, str] = {}
-for _section_name, _section_model in _SECTION_MODELS.items():
-    for _field_name in _section_model.model_fields:
-        _FLAT_FIELD_TO_SECTION[_field_name] = _section_name
-del _section_name, _section_model, _field_name
+_FLAT_FIELD_TO_GROUP: dict[str, str] = {
+    field_name: group_name
+    for group_name, group_model in _CONFIG_GROUP_MODELS.items()
+    for field_name in group_model.model_fields
+}
 
 
 class DynSCMConfig(_FrozenConfigModel):
@@ -258,39 +258,45 @@ class DynSCMConfig(_FrozenConfigModel):
             return data
 
         normalized = dict(data)
-        for section_name, section_model in _SECTION_MODELS.items():
-            section_value = normalized.get(section_name)
-            section_payload: dict[str, Any] | None = None
-            if section_value is not None:
-                if not isinstance(section_value, Mapping):
-                    continue
-                section_payload = dict(section_value)
+        for group_name, group_model in _CONFIG_GROUP_MODELS.items():
+            group_value = normalized.get(group_name)
+            has_nested_group = group_value is not None
+            if group_value is None:
+                group_payload: dict[str, Any] = {}
+            elif isinstance(group_value, Mapping):
+                group_payload = dict(group_value)
+            else:
+                continue
 
-            for field_name in section_model.model_fields:
-                if field_name not in normalized:
-                    continue
-                if section_payload is not None and field_name in section_payload:
-                    raise ValueError(
-                        "Received both flat and nested values for "
-                        f"'{field_name}' in section '{section_name}'."
-                    )
-                if section_payload is None:
-                    section_payload = {}
-                section_payload[field_name] = normalized.pop(field_name)
-            if section_payload is not None:
-                normalized[section_name] = section_payload
+            flat_fields = {
+                field_name: normalized.pop(field_name)
+                for field_name in group_model.model_fields
+                if field_name in normalized
+            }
+            duplicate_fields = group_payload.keys() & flat_fields.keys()
+            if duplicate_fields:
+                duplicate_field = next(iter(duplicate_fields))
+                raise ValueError(
+                    "Received both flat and nested values for "
+                    f"'{duplicate_field}' in group '{group_name}'."
+                )
+
+            if flat_fields:
+                group_payload.update(flat_fields)
+            if has_nested_group or flat_fields:
+                normalized[group_name] = group_payload
         return normalized
 
     @model_validator(mode="after")
     def _cross_validate(self) -> DynSCMConfig:
         errors = []
 
-        if self.features.l_max_feature > self.shape.series_length_min - 2:
-            errors.append("l_max_feature must be <= series_length_min - 2.")
+        if self.features.max_feature_lag > self.shape.series_length_min - 2:
+            errors.append("max_feature_lag must be <= series_length_min - 2.")
         if (
             self.regime.share_base_graph
             and not self.regime.shared_order
-            and self.graph.use_contemporaneous
+            and self.graph.use_contemp_edges
         ):
             errors.append(
                 "share_base_graph=True with shared_order=False is invalid when "
@@ -302,10 +308,10 @@ class DynSCMConfig(_FrozenConfigModel):
         return self
 
     def __getattr__(self, name: str) -> Any:
-        section_name = _FLAT_FIELD_TO_SECTION.get(name)
-        if section_name is not None:
-            section = super().__getattribute__(section_name)
-            return getattr(section, name)
+        group_name = _FLAT_FIELD_TO_GROUP.get(name)
+        if group_name is not None:
+            group = super().__getattribute__(group_name)
+            return getattr(group, name)
         raise AttributeError(f"{type(self).__name__!s} has no attribute {name!r}")
 
     def validate(self) -> DynSCMConfig:
@@ -313,9 +319,9 @@ class DynSCMConfig(_FrozenConfigModel):
 
     def to_dict(self) -> dict[str, Any]:
         payload = {"random_seed": self.random_seed}
-        for section_name in _SECTION_MODELS:
-            section = getattr(self, section_name)
-            payload.update(section.model_dump(mode="python"))
+        for group_name in _CONFIG_GROUP_MODELS:
+            group = getattr(self, group_name)
+            payload.update(group.model_dump(mode="python"))
         return payload
 
     def with_overrides(self, **overrides: Any) -> DynSCMConfig:

@@ -1,4 +1,4 @@
-"""Stability guard utilities for DynSCM coefficient sampling."""
+"""Stability utilities for DynSCM coefficient sampling."""
 
 from __future__ import annotations
 
@@ -14,15 +14,24 @@ from .graph import DynSCMGraphSample
 class DynSCMStabilitySample:
     """Sampled stable coefficients coupled to a DynSCM regime graph."""
 
-    num_vars: int
-    num_regimes: int
-    max_lag: int
     lag_coefficients: np.ndarray  # (K, L, p, p), source->target coefficients.
     contemporaneous_coefficients: np.ndarray  # (K, p, p), source->target coefficients.
     lag_column_budgets: np.ndarray  # (K, p), per-target budgets for lag edges.
     contemp_column_budgets: np.ndarray  # (K, p), per-target budgets for cont. edges.
-    guardc_scale_factors: np.ndarray  # (K,), multiplicative scale applied to lag block.
-    lag_spectral_radii: np.ndarray  # (K,), spectral radius after optional guard-c.
+    spectral_rescale_factors: np.ndarray  # (K,), multiplicative lag rescale factors.
+    lag_spectral_radii: np.ndarray  # (K,), spectral radius after optional rescaling.
+
+    @property
+    def num_regimes(self) -> int:
+        return self.lag_coefficients.shape[0]
+
+    @property
+    def max_lag(self) -> int:
+        return self.lag_coefficients.shape[1]
+
+    @property
+    def num_vars(self) -> int:
+        return self.lag_coefficients.shape[2]
 
 
 def sample_stable_coefficients(
@@ -31,20 +40,10 @@ def sample_stable_coefficients(
     *,
     seed: int | None = None,
 ) -> DynSCMStabilitySample:
-    """Sample regime-specific coefficients with Guard A and optional Guard C."""
+
     num_regimes = graph_sample.num_regimes
     max_lag = graph_sample.max_lag
     num_vars = graph_sample.num_vars
-
-    if cfg.max_lag != max_lag:
-        raise ValueError(
-            f"Graph max_lag={max_lag} does not match config max_lag={cfg.max_lag}."
-        )
-    if cfg.num_regimes != num_regimes:
-        raise ValueError(
-            "Graph num_regimes="
-            f"{num_regimes} does not match config num_regimes={cfg.num_regimes}."
-        )
 
     rng = cfg.make_rng(seed)
 
@@ -56,7 +55,7 @@ def sample_stable_coefficients(
     )
     lag_column_budgets = np.zeros((num_regimes, num_vars), dtype=np.float64)
     contemp_column_budgets = np.zeros((num_regimes, num_vars), dtype=np.float64)
-    guardc_scale_factors = np.ones((num_regimes,), dtype=np.float64)
+    spectral_rescale_factors = np.ones((num_regimes,), dtype=np.float64)
     lag_spectral_radii = np.zeros((num_regimes,), dtype=np.float64)
 
     for regime_idx in range(num_regimes):
@@ -81,12 +80,12 @@ def sample_stable_coefficients(
             rng=rng,
         )[0]
 
-        if cfg.enable_guardc_rescale:
-            lag_block, scale, rho = guardc_rescale_lag_block(
+        if cfg.enable_spectral_rescale:
+            lag_block, scale, rho = rescale_lag_block_to_spectral_radius(
                 lag_coefficients=lag_block,
-                delta=cfg.guardc_delta,
+                spectral_radius_cap=cfg.spectral_radius_cap,
             )
-            guardc_scale_factors[regime_idx] = scale
+            spectral_rescale_factors[regime_idx] = scale
             lag_spectral_radii[regime_idx] = rho
         else:
             lag_spectral_radii[regime_idx] = companion_spectral_radius(lag_block)
@@ -107,14 +106,11 @@ def sample_stable_coefficients(
     )
 
     return DynSCMStabilitySample(
-        num_vars=num_vars,
-        num_regimes=num_regimes,
-        max_lag=max_lag,
         lag_coefficients=lag_coefficients,
         contemporaneous_coefficients=contemporaneous_coefficients,
         lag_column_budgets=lag_column_budgets,
         contemp_column_budgets=contemp_column_budgets,
-        guardc_scale_factors=guardc_scale_factors,
+        spectral_rescale_factors=spectral_rescale_factors,
         lag_spectral_radii=lag_spectral_radii,
     )
 
@@ -134,18 +130,8 @@ def sample_signed_budgeted_coefficients(
     Returns:
         Coefficients with same shape as edge_mask and support constrained to edge_mask.
     """
-    if edge_mask.ndim != 3:
-        raise ValueError("edge_mask must have shape (B, p, p).")
-    num_blocks, num_sources, num_targets = edge_mask.shape
-    if num_sources != num_targets:
-        raise ValueError("edge_mask must be square in source/target dimensions.")
-    if target_budgets.shape != (num_targets,):
-        raise ValueError(
-            "target_budgets must have shape "
-            f"({num_targets},), got {target_budgets.shape}."
-        )
-    if np.any(target_budgets < 0):
-        raise ValueError("target_budgets must be non-negative.")
+
+    _, _, num_targets = edge_mask.shape
 
     coefficients = np.zeros(edge_mask.shape, dtype=np.float64)
     for target in range(num_targets):
@@ -178,8 +164,7 @@ def project_to_column_budgets(
     target_budgets: np.ndarray,
 ) -> np.ndarray:
     """Project lag coefficients to per-target L1 column budgets."""
-    if lag_coefficients.ndim != 3:
-        raise ValueError("lag_coefficients must have shape (L, p, p).")
+
     _, _, num_targets = lag_coefficients.shape
     if target_budgets.shape != (num_targets,):
         raise ValueError(
@@ -191,8 +176,6 @@ def project_to_column_budgets(
     l1_per_target = np.sum(np.abs(projected), axis=(0, 1))
     for target in range(num_targets):
         budget = float(target_budgets[target])
-        if budget < 0.0:
-            raise ValueError("target budgets must be non-negative.")
         norm = float(l1_per_target[target])
         if norm <= budget or norm == 0.0:
             continue
@@ -206,8 +189,6 @@ def build_companion_matrix(lag_coefficients: np.ndarray) -> np.ndarray:
     The expected orientation is source->target, i.e. coefficient[source, target].
     This is converted internally to the standard row-target form.
     """
-    if lag_coefficients.ndim != 3:
-        raise ValueError("lag_coefficients must have shape (L, p, p).")
     max_lag, num_sources, num_targets = lag_coefficients.shape
     if num_sources != num_targets:
         raise ValueError("lag_coefficients must have square source/target dimensions.")
@@ -235,39 +216,31 @@ def companion_spectral_radius(lag_coefficients: np.ndarray) -> float:
     return float(np.max(np.abs(eigenvalues)))
 
 
-def guardc_rescale_lag_block(
+def rescale_lag_block_to_spectral_radius(
     lag_coefficients: np.ndarray,
     *,
-    delta: float,
+    spectral_radius_cap: float,
     max_iter: int = 64,
     step_ceiling: float = 0.98,
 ) -> tuple[np.ndarray, float, float]:
-    """Rescale lag block so companion spectral radius is <= delta."""
-    if lag_coefficients.ndim != 3:
-        raise ValueError("lag_coefficients must have shape (L, p, p).")
-    if not 0.0 < delta < 1.0:
-        raise ValueError("delta must be in (0, 1).")
-    if max_iter < 1:
-        raise ValueError("max_iter must be >= 1.")
-    if not 0.0 < step_ceiling < 1.0:
-        raise ValueError("step_ceiling must be in (0, 1).")
+    """Rescale lag block so companion spectral radius is <= spectral_radius_cap."""
 
     scaled = lag_coefficients.astype(np.float64, copy=True)
     rho = companion_spectral_radius(scaled)
-    if rho <= delta or rho == 0.0:
+    if rho <= spectral_radius_cap or rho == 0.0:
         return scaled, 1.0, rho
 
     factor = 1.0
     for _ in range(max_iter):
-        step = min(step_ceiling, delta / (rho + 1e-12))
+        step = min(step_ceiling, spectral_radius_cap / (rho + 1e-12))
         factor *= step
         scaled = lag_coefficients * factor
         rho = companion_spectral_radius(scaled)
-        if rho <= delta:
+        if rho <= spectral_radius_cap:
             return scaled, factor, rho
 
-    # Final guarded step if numerical noise prevented convergence in the loop.
-    factor *= min(step_ceiling, delta / (rho + 1e-12))
+    # Final fallback step if numerical noise prevented convergence in the loop.
+    factor *= min(step_ceiling, spectral_radius_cap / (rho + 1e-12))
     scaled = lag_coefficients * factor
     rho = companion_spectral_radius(scaled)
     return scaled, factor, rho
@@ -280,8 +253,10 @@ def project_after_drift(
 ) -> tuple[np.ndarray, float, float]:
     """Project drifted lag coefficients back into the stable set."""
     projected = project_to_column_budgets(lag_coefficients, target_budgets)
-    if cfg.enable_guardc_rescale:
-        return guardc_rescale_lag_block(projected, delta=cfg.guardc_delta)
+    if cfg.enable_spectral_rescale:
+        return rescale_lag_block_to_spectral_radius(
+            projected, spectral_radius_cap=cfg.spectral_radius_cap
+        )
     return projected, 1.0, companion_spectral_radius(projected)
 
 
@@ -341,7 +316,7 @@ def _validate_stability_sample(
     if np.any(contemp_column_budgets > cfg.contemp_budget_max + tol):
         raise RuntimeError("Sampled contemporaneous budgets above maximum.")
 
-    if cfg.enable_guardc_rescale and np.any(
-        lag_spectral_radii > cfg.guardc_delta + 1e-6
+    if cfg.enable_spectral_rescale and np.any(
+        lag_spectral_radii > cfg.spectral_radius_cap + 1e-6
     ):
-        raise RuntimeError("Guard C spectral radius constraint violated.")
+        raise RuntimeError("Spectral radius constraint violated.")

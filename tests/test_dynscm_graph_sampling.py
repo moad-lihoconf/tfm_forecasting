@@ -132,9 +132,10 @@ def test_graph_invariants_respected(dynscm_api):
         for source, target in np.argwhere(contemporaneous):
             assert positions[source] < positions[target]
 
-        assert (contemporaneous.sum(axis=0) <= cfg.dmax_0).all()
+        assert (contemporaneous.sum(axis=0) <= cfg.max_contemp_parents).all()
         assert (
-            sample.regime_lagged_adjacency[regime_idx].sum(axis=1) <= cfg.dmax_lag
+            sample.regime_lagged_adjacency[regime_idx].sum(axis=1)
+            <= cfg.max_lagged_parents
         ).all()
 
     assert len(sample.regime_parent_sets) == cfg.num_regimes
@@ -147,7 +148,7 @@ def test_graph_invariants_respected(dynscm_api):
 def test_no_contemporaneous_mode_produces_no_contemporaneous_edges(dynscm_api):
     dynscm_config, sample_regime_graphs = dynscm_api
 
-    cfg = dynscm_config(use_contemporaneous=False, share_base_graph=False)
+    cfg = dynscm_config(use_contemp_edges=False, share_base_graph=False)
     sample = sample_regime_graphs(cfg, num_vars=9, seed=23)
 
     assert not sample.base_contemporaneous_adjacency.any()
