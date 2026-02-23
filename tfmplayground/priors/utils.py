@@ -3,34 +3,38 @@
 import h5py
 import numpy as np
 import torch
-from ticl.priors import (
-    BooleanConjunctionPrior,
-    ClassificationAdapterPrior,
-    GPPrior,
-    MLPPrior,
-    StepFunctionPrior,
-)
 from tqdm import tqdm
 
 from .config import get_tabpfn_prior_config, get_ticl_prior_config
 
 
 def build_ticl_prior(
-    prior_type: str, base_prior: str | None = None, max_num_classes: int | None = None
-) -> (
-    MLPPrior
-    | GPPrior
-    | ClassificationAdapterPrior
-    | BooleanConjunctionPrior
-    | StepFunctionPrior
-):
-    """Builds a TICL prior based on the prior type string using the defaults in config.py.
+    prior_type: str,
+    base_prior: str | None = None,
+    max_num_classes: int | None = None,
+) -> object:
+    """Build a TICL prior from defaults defined in `priors/config.py`.
 
     Args:
-        prior_type: Type of TICL prior ('mlp', 'gp', 'classification_adapter', etc.)
-        base_prior: Base regression prior for composite priors (e.g., 'mlp' or 'gp' for classification_adapter)
+        prior_type: Type of TICL prior
+            ('mlp', 'gp', 'classification_adapter', etc.).
+        base_prior: Base regression prior for composite priors
+            (e.g., 'mlp' or 'gp' for classification_adapter).
         max_num_classes: Maximum number of classes for classification priors
     """
+    try:
+        from ticl.priors import (
+            BooleanConjunctionPrior,
+            ClassificationAdapterPrior,
+            GPPrior,
+            MLPPrior,
+            StepFunctionPrior,
+        )
+    except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency.
+        raise RuntimeError(
+            "TICL dependencies are unavailable. Install optional TICL extras "
+            "to use build_ticl_prior."
+        ) from exc
 
     cfg = get_ticl_prior_config(prior_type)
 
@@ -44,10 +48,11 @@ def build_ticl_prior(
         # build the base regression prior
         base_prior_obj = build_ticl_prior(base_prior)
 
-        # we equate them rather than treating num_classes as a separate parameter because:
+        # We equate these values rather than sampling `num_classes` separately:
         # - max_num_classes serves as the upper bound for TICL's internal sampling
-        # - even with num_classes set to a constant, TICL's class_sampler_f() will internally
-        #   vary the actual number of classes (50% chance of 2, 50% chance of uniform(2, num_classes))
+        # - even with fixed num_classes, TICL's class_sampler_f() can still vary
+        #   the effective class count (50% chance of 2, else uniform in
+        #   [2, num_classes])
         cfg["max_num_classes"] = max_num_classes
         cfg["num_classes"] = max_num_classes
         return ClassificationAdapterPrior(base_prior_obj, **cfg)
@@ -60,7 +65,7 @@ def build_ticl_prior(
 
 
 def build_tabpfn_prior(prior_type: str, max_classes: int) -> dict:
-    """Builds TabPFN prior configuration with appropriate settings for regression or classification.
+    """Build TabPFN prior configuration for regression or classification.
 
     Args:
         prior_type: Type of TabPFN prior ('mlp', 'gp', 'prior_bag')
@@ -75,7 +80,7 @@ def build_tabpfn_prior(prior_type: str, max_classes: int) -> dict:
         "flexible": not is_regression,  # false for regression, true for classification
         "max_num_classes": 2
         if is_regression
-        else max_classes,  # library weirdly requires >=2 regardless of regression or classification
+        else max_classes,  # library requires >=2 for both tasks
         # num_classes parameter in the library code is equated to max_num_classes
         # so its not varied separately here
         "prior_config": {
@@ -147,10 +152,15 @@ def dump_prior_to_h5(
             if isinstance(single_eval_pos, torch.Tensor):
                 single_eval_pos = single_eval_pos.item()
 
-            # pad x and y to the maximum sequence length and number of features needed for tabicl
+            # Pad x/y to maximum sequence length and feature count expected by
+            # downstream tabular prior loaders.
             x_padded = np.pad(
                 x,
-                ((0, 0), (0, max_seq_len - x.shape[1]), (0, max_features - x.shape[2])),
+                (
+                    (0, 0),
+                    (0, max_seq_len - x.shape[1]),
+                    (0, max_features - x.shape[2]),
+                ),
                 mode="constant",
             )
             y_padded = np.pad(

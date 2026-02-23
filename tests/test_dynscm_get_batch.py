@@ -2,53 +2,14 @@
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-import types
-from pathlib import Path
-
 import numpy as np
 import pytest
 import torch
 
 
-def _load_module(fullname: str, filepath: Path):
-    spec = importlib.util.spec_from_file_location(fullname, filepath)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(
-            f"Could not create module spec for {fullname} from {filepath}"
-        )
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[fullname] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def _load_dynscm_api():
-    repo_root = Path(__file__).resolve().parents[1]
-    dyn_dir = repo_root / "tfmplayground" / "priors" / "dynscm"
-
-    for pkg_name, pkg_path in (
-        ("tfmplayground", repo_root / "tfmplayground"),
-        ("tfmplayground.priors", repo_root / "tfmplayground" / "priors"),
-        ("tfmplayground.priors.dynscm", dyn_dir),
-    ):
-        pkg = types.ModuleType(pkg_name)
-        pkg.__path__ = [str(pkg_path)]
-        sys.modules[pkg_name] = pkg
-
-    config_mod = _load_module(
-        "tfmplayground.priors.dynscm.config", dyn_dir / "config.py"
-    )
-    get_batch_mod = _load_module(
-        "tfmplayground.priors.dynscm.get_batch", dyn_dir / "get_batch.py"
-    )
-    return config_mod, get_batch_mod
-
-
 @pytest.fixture(scope="module")
-def dynscm_api():
-    return _load_dynscm_api()
+def dynscm_api(dynscm_modules):
+    return dynscm_modules["config"], dynscm_modules["get_batch"]
 
 
 def test_make_get_batch_dynscm_contract_shapes_and_padding(dynscm_api):
@@ -207,3 +168,67 @@ def test_get_batch_validates_inputs(dynscm_api):
     # Use valid config but num_datapoints_max too small for any feasible pair.
     with pytest.raises(ValueError, match="feasible"):
         get_batch(batch_size=1, num_datapoints_max=2, num_features=8)
+
+
+@pytest.mark.parametrize(
+    (
+        "missing_mode",
+        "use_contemp_edges",
+        "drift_std",
+        "num_kernels",
+        "add_mask_channels",
+    ),
+    [
+        ("off", True, 0.0, 0, False),
+        ("mcar", False, 0.03, 2, True),
+        ("mar", True, 0.0, 2, False),
+        ("mnar_lite", False, 0.02, 0, True),
+        ("mix", True, 0.05, 2, True),
+    ],
+)
+def test_get_batch_scenario_matrix(
+    dynscm_api,
+    missing_mode: str,
+    use_contemp_edges: bool,
+    drift_std: float,
+    num_kernels: int,
+    add_mask_channels: bool,
+):
+    config_mod, get_batch_mod = dynscm_api
+    cfg = config_mod.DynSCMConfig.from_dict(
+        {
+            "num_variables_min": 3,
+            "num_variables_max": 4,
+            "series_length_min": 96,
+            "series_length_max": 96,
+            "max_lag": 6,
+            "mechanism_type": "linear_var",
+            "use_contemp_edges": use_contemp_edges,
+            "drift_std": drift_std,
+            "missing_mode": missing_mode,
+            "num_kernels": num_kernels,
+            "add_mask_channels": add_mask_channels,
+            "train_rows_min": 8,
+            "train_rows_max": 8,
+            "test_rows_min": 4,
+            "test_rows_max": 4,
+        }
+    )
+    get_batch = get_batch_mod.make_get_batch_dynscm(
+        cfg,
+        device=torch.device("cpu"),
+        seed=123,
+    )
+
+    batch = get_batch(batch_size=2, num_datapoints_max=16, num_features=24)
+    x = batch["x"]
+    y = batch["y"]
+    split = int(batch["single_eval_pos"])
+
+    assert x.shape == (2, 16, 24)
+    assert y.shape == (2, 16)
+    assert 0 < split < 16
+    assert torch.isfinite(x).all()
+    assert torch.isfinite(y).all()
+    assert not torch.isnan(x).any()
+    assert not torch.isnan(y[:, :split]).any()

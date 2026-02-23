@@ -1,54 +1,18 @@
-"""Concise tests for DynSCM phase-3 stability constraints."""
+"""Concise tests for DynSCM stability constraints."""
 
 from __future__ import annotations
-
-import importlib.util
-import sys
-import types
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 
-def _load_module(fullname: str, filepath: Path):
-    spec = importlib.util.spec_from_file_location(fullname, filepath)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(
-            f"Could not create module spec for {fullname} from {filepath}"
-        )
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[fullname] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def _load_dynscm_api():
-    repo_root = Path(__file__).resolve().parents[1]
-    dyn_dir = repo_root / "tfmplayground" / "priors" / "dynscm"
-
-    for pkg_name, pkg_path in (
-        ("tfmplayground", repo_root / "tfmplayground"),
-        ("tfmplayground.priors", repo_root / "tfmplayground" / "priors"),
-        ("tfmplayground.priors.dynscm", dyn_dir),
-    ):
-        pkg = types.ModuleType(pkg_name)
-        pkg.__path__ = [str(pkg_path)]
-        sys.modules[pkg_name] = pkg
-
-    config_mod = _load_module(
-        "tfmplayground.priors.dynscm.config", dyn_dir / "config.py"
-    )
-    graph_mod = _load_module("tfmplayground.priors.dynscm.graph", dyn_dir / "graph.py")
-    stability_mod = _load_module(
-        "tfmplayground.priors.dynscm.stability", dyn_dir / "stability.py"
-    )
-    return config_mod, graph_mod, stability_mod
-
-
 @pytest.fixture(scope="module")
-def dynscm_api():
-    return _load_dynscm_api()
+def dynscm_api(dynscm_modules):
+    return (
+        dynscm_modules["config"],
+        dynscm_modules["graph"],
+        dynscm_modules["stability"],
+    )
 
 
 def test_sample_stable_coefficients_is_seed_deterministic(dynscm_api):
@@ -123,3 +87,39 @@ def test_spectral_rescale_enabled_in_sampling_enforces_cap(dynscm_api):
     graph = graph_mod.sample_regime_graphs(cfg, num_vars=9, seed=13)
     sample = stability_mod.sample_stable_coefficients(cfg, graph, seed=14)
     assert np.all(sample.lag_spectral_radii <= cfg.spectral_radius_cap + 1e-6)
+
+
+@pytest.mark.parametrize("drift_std", [0.0, 0.05])
+def test_project_after_drift_preserves_guard_a_budgets(dynscm_api, drift_std: float):
+    """Scenario coverage: regime-only (0.0) and regime+smooth-drift (>0)."""
+    config_mod, graph_mod, stability_mod = dynscm_api
+    cfg = config_mod.DynSCMConfig.from_dict(
+        {
+            "drift_std": drift_std,
+            "enable_spectral_rescale": True,
+            "spectral_radius_cap": 0.95,
+        }
+    )
+    graph = graph_mod.sample_regime_graphs(cfg, num_vars=7, seed=21)
+    stable = stability_mod.sample_stable_coefficients(cfg, graph, seed=22)
+
+    regime_idx = 0
+    rng = np.random.default_rng(23)
+    drift_noise = rng.normal(
+        loc=0.0,
+        scale=drift_std,
+        size=stable.lag_coeffs[regime_idx].shape,
+    )
+    support = graph.regime_lagged_adjacency[regime_idx].astype(np.float64)
+    drifted = stable.lag_coeffs[regime_idx] + drift_noise * support
+
+    projected, _, spectral_radius = stability_mod.project_after_drift(
+        cfg,
+        drifted,
+        stable.lag_column_budgets[regime_idx],
+    )
+
+    tol = 1e-8
+    lag_l1 = np.sum(np.abs(projected), axis=(0, 1))
+    assert np.all(lag_l1 <= stable.lag_column_budgets[regime_idx] + tol)
+    assert spectral_radius <= cfg.spectral_radius_cap + 1e-6

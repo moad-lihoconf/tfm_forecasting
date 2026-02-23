@@ -1,56 +1,18 @@
-"""Concise tests for DynSCM phase-7 forecast featurization."""
+"""Concise tests for DynSCM forecast featurization."""
 
 from __future__ import annotations
-
-import importlib.util
-import sys
-import types
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 
-def _load_module(fullname: str, filepath: Path):
-    spec = importlib.util.spec_from_file_location(fullname, filepath)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(
-            f"Could not create module spec for {fullname} from {filepath}"
-        )
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[fullname] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def _load_dynscm_api():
-    repo_root = Path(__file__).resolve().parents[1]
-    dyn_dir = repo_root / "tfmplayground" / "priors" / "dynscm"
-
-    for pkg_name, pkg_path in (
-        ("tfmplayground", repo_root / "tfmplayground"),
-        ("tfmplayground.priors", repo_root / "tfmplayground" / "priors"),
-        ("tfmplayground.priors.dynscm", dyn_dir),
-    ):
-        pkg = types.ModuleType(pkg_name)
-        pkg.__path__ = [str(pkg_path)]
-        sys.modules[pkg_name] = pkg
-
-    config_mod = _load_module(
-        "tfmplayground.priors.dynscm.config", dyn_dir / "config.py"
-    )
-    features_mod = _load_module(
-        "tfmplayground.priors.dynscm.features", dyn_dir / "features.py"
-    )
-    missing_mod = _load_module(
-        "tfmplayground.priors.dynscm.missingness", dyn_dir / "missingness.py"
-    )
-    return config_mod, features_mod, missing_mod
-
-
 @pytest.fixture(scope="module")
-def dynscm_api():
-    return _load_dynscm_api()
+def dynscm_api(dynscm_modules):
+    return (
+        dynscm_modules["config"],
+        dynscm_modules["features"],
+        dynscm_modules["missingness"],
+    )
 
 
 def test_sample_origins_and_horizons_enforces_split_and_index_safety(dynscm_api):
@@ -75,6 +37,39 @@ def test_sample_origins_and_horizons_enforces_split_and_index_safety(dynscm_api)
     assert np.all(t_idx >= required_lag)
     assert np.all(t_idx + h_idx < 220)
     assert np.all(np.max(t_idx[:, :18], axis=1) < np.min(t_idx[:, 18:], axis=1))
+
+
+def test_non_leak_indexing_guarantee(dynscm_api):
+    config_mod, features_mod, _ = dynscm_api
+    cfg = config_mod.DynSCMConfig.from_dict(
+        {
+            "max_feature_lag": 12,
+            "explicit_lags": (0, 1, 2, 4),
+            "forecast_horizons": (1, 2, 3),
+        }
+    )
+    t_idx, h_idx = features_mod.sample_origins_and_horizons(
+        cfg,
+        batch_size=5,
+        num_steps=160,
+        n_train=12,
+        n_test=6,
+        seed=71,
+    )
+
+    explicit_lags = np.asarray(cfg.explicit_lags, dtype=np.int64)
+    lag_indices = t_idx[:, :, None] - explicit_lags[None, None, :]
+    assert np.all(lag_indices >= 0)
+    assert np.all(lag_indices <= t_idx[:, :, None])
+
+    kernel_start = t_idx - cfg.max_feature_lag
+    kernel_end = t_idx - 1
+    assert np.all(kernel_start >= 0)
+    assert np.all(kernel_end <= t_idx)
+
+    y_time = t_idx + h_idx
+    assert np.all(y_time > t_idx)
+    assert np.all(y_time < 160)
 
 
 def test_build_forecasting_table_extracts_exact_labels_and_metadata(dynscm_api):

@@ -1,53 +1,14 @@
-"""Concise tests for DynSCM phase-6 raw missingness masks."""
+"""Concise tests for DynSCM raw missingness masks."""
 
 from __future__ import annotations
-
-import importlib.util
-import sys
-import types
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 
-def _load_module(fullname: str, filepath: Path):
-    spec = importlib.util.spec_from_file_location(fullname, filepath)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(
-            f"Could not create module spec for {fullname} from {filepath}"
-        )
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[fullname] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def _load_dynscm_api():
-    repo_root = Path(__file__).resolve().parents[1]
-    dyn_dir = repo_root / "tfmplayground" / "priors" / "dynscm"
-
-    for pkg_name, pkg_path in (
-        ("tfmplayground", repo_root / "tfmplayground"),
-        ("tfmplayground.priors", repo_root / "tfmplayground" / "priors"),
-        ("tfmplayground.priors.dynscm", dyn_dir),
-    ):
-        pkg = types.ModuleType(pkg_name)
-        pkg.__path__ = [str(pkg_path)]
-        sys.modules[pkg_name] = pkg
-
-    config_mod = _load_module(
-        "tfmplayground.priors.dynscm.config", dyn_dir / "config.py"
-    )
-    missing_mod = _load_module(
-        "tfmplayground.priors.dynscm.missingness", dyn_dir / "missingness.py"
-    )
-    return config_mod, missing_mod
-
-
 @pytest.fixture(scope="module")
-def dynscm_api():
-    return _load_dynscm_api()
+def dynscm_api(dynscm_modules):
+    return dynscm_modules["config"], dynscm_modules["missingness"]
 
 
 def _max_false_run(mask_1d: np.ndarray) -> int:

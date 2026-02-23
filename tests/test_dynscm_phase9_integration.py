@@ -2,73 +2,13 @@
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-import types
-from pathlib import Path
-
 import pytest
 import torch
 
 
-def _load_module(fullname: str, filepath: Path):
-    spec = importlib.util.spec_from_file_location(fullname, filepath)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(
-            f"Could not create module spec for {fullname} from {filepath}"
-        )
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[fullname] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def _load_priors_api():
-    repo_root = Path(__file__).resolve().parents[1]
-    priors_dir = repo_root / "tfmplayground" / "priors"
-    dyn_dir = priors_dir / "dynscm"
-
-    for pkg_name, pkg_path in (
-        ("tfmplayground", repo_root / "tfmplayground"),
-        ("tfmplayground.priors", priors_dir),
-        ("tfmplayground.priors.dynscm", dyn_dir),
-    ):
-        pkg = types.ModuleType(pkg_name)
-        pkg.__path__ = [str(pkg_path)]
-        sys.modules[pkg_name] = pkg
-
-    # Load dynscm modules first so dataloader/main can resolve imports.
-    config_mod = _load_module(
-        "tfmplayground.priors.dynscm.config", dyn_dir / "config.py"
-    )
-    _load_module("tfmplayground.priors.dynscm.graph", dyn_dir / "graph.py")
-    _load_module("tfmplayground.priors.dynscm.stability", dyn_dir / "stability.py")
-    _load_module("tfmplayground.priors.dynscm.mechanisms", dyn_dir / "mechanisms.py")
-    _load_module("tfmplayground.priors.dynscm.simulate", dyn_dir / "simulate.py")
-    _load_module("tfmplayground.priors.dynscm.missingness", dyn_dir / "missingness.py")
-    _load_module("tfmplayground.priors.dynscm.features", dyn_dir / "features.py")
-    _load_module("tfmplayground.priors.dynscm.get_batch", dyn_dir / "get_batch.py")
-    _load_module("tfmplayground.priors.dynscm", dyn_dir / "__init__.py")
-
-    dataloader_mod = _load_module(
-        "tfmplayground.priors.dataloader", priors_dir / "dataloader.py"
-    )
-
-    # Stub utils to avoid importing optional heavy deps (wandb/xgboost/ticl extras)
-    # while testing DynSCM repository wiring.
-    utils_stub = types.ModuleType("tfmplayground.priors.utils")
-    utils_stub.build_tabpfn_prior = lambda *args, **kwargs: {}
-    utils_stub.build_ticl_prior = lambda *args, **kwargs: {}
-    utils_stub.dump_prior_to_h5 = lambda *args, **kwargs: None
-    sys.modules["tfmplayground.priors.utils"] = utils_stub
-
-    main_mod = _load_module("tfmplayground.priors.main", priors_dir / "main.py")
-    root_mod = _load_module("tfmplayground.priors", priors_dir / "__init__.py")
-    return config_mod, dataloader_mod, main_mod, root_mod
-
-
-def test_dynscm_override_parser_and_config_loader():
-    config_mod, _, main_mod, _ = _load_priors_api()
+def test_dynscm_override_parser_and_config_loader(priors_modules):
+    config_mod = priors_modules["config"]
+    main_mod = priors_modules["main"]
 
     parsed = main_mod._parse_dynscm_overrides(
         [
@@ -92,8 +32,10 @@ def test_dynscm_override_parser_and_config_loader():
     assert cfg.num_kernels == 1
 
 
-def test_dynscm_prior_dataloader_contract_and_root_exports():
-    config_mod, dataloader_mod, _, root_mod = _load_priors_api()
+def test_dynscm_prior_dataloader_contract_and_root_exports(priors_modules):
+    config_mod = priors_modules["config"]
+    dataloader_mod = priors_modules["dataloader"]
+    root_mod = priors_modules["root"]
 
     cfg = config_mod.DynSCMConfig.from_dict(
         {
@@ -136,8 +78,8 @@ def test_dynscm_prior_dataloader_contract_and_root_exports():
     assert hasattr(root_mod, "make_get_batch_dynscm")
 
 
-def test_dynscm_override_parser_validates_inputs():
-    _, _, main_mod, _ = _load_priors_api()
+def test_dynscm_override_parser_validates_inputs(priors_modules):
+    main_mod = priors_modules["main"]
 
     with pytest.raises(ValueError, match="key=value"):
         main_mod._parse_dynscm_overrides(["no_equals_sign"])

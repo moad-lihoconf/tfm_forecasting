@@ -1,57 +1,19 @@
-"""Concise tests for DynSCM phase-4 mechanisms."""
+"""Concise tests for DynSCM mechanisms."""
 
 from __future__ import annotations
-
-import importlib.util
-import sys
-import types
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 
-def _load_module(fullname: str, filepath: Path):
-    spec = importlib.util.spec_from_file_location(fullname, filepath)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(
-            f"Could not create module spec for {fullname} from {filepath}"
-        )
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[fullname] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def _load_dynscm_api():
-    repo_root = Path(__file__).resolve().parents[1]
-    dyn_dir = repo_root / "tfmplayground" / "priors" / "dynscm"
-
-    for pkg_name, pkg_path in (
-        ("tfmplayground", repo_root / "tfmplayground"),
-        ("tfmplayground.priors", repo_root / "tfmplayground" / "priors"),
-        ("tfmplayground.priors.dynscm", dyn_dir),
-    ):
-        pkg = types.ModuleType(pkg_name)
-        pkg.__path__ = [str(pkg_path)]
-        sys.modules[pkg_name] = pkg
-
-    config_mod = _load_module(
-        "tfmplayground.priors.dynscm.config", dyn_dir / "config.py"
-    )
-    graph_mod = _load_module("tfmplayground.priors.dynscm.graph", dyn_dir / "graph.py")
-    stability_mod = _load_module(
-        "tfmplayground.priors.dynscm.stability", dyn_dir / "stability.py"
-    )
-    mechanisms_mod = _load_module(
-        "tfmplayground.priors.dynscm.mechanisms", dyn_dir / "mechanisms.py"
-    )
-    return config_mod, graph_mod, stability_mod, mechanisms_mod
-
-
 @pytest.fixture(scope="module")
-def dynscm_api():
-    return _load_dynscm_api()
+def dynscm_api(dynscm_modules):
+    return (
+        dynscm_modules["config"],
+        dynscm_modules["graph"],
+        dynscm_modules["stability"],
+        dynscm_modules["mechanisms"],
+    )
 
 
 def test_sample_regime_mechanisms_is_seed_deterministic(dynscm_api):
