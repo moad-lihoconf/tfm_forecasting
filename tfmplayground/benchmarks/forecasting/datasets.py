@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
@@ -113,7 +114,7 @@ DEFAULT_DATASET_SPECS: dict[str, DatasetSpec] = {
         cache_file="exchange_rate.npz",
         source_url=(
             "https://raw.githubusercontent.com/laiguokun/"
-            "multivariate-time-series-data/master/exchange_rate/exchange_rate.txt"
+            "multivariate-time-series-data/master/exchange_rate/exchange_rate.txt.gz"
         ),
     ),
 }
@@ -234,7 +235,11 @@ def _download_ettm1(url: str) -> np.ndarray:
 def _download_exchange_rate(url: str) -> np.ndarray:
     response = requests.get(url, timeout=30)
     response.raise_for_status()
-    values = np.loadtxt(StringIO(response.text), delimiter=",")
+    if url.endswith(".gz"):
+        text = gzip.decompress(response.content).decode("utf-8")
+    else:
+        text = response.text
+    values = np.loadtxt(StringIO(text), delimiter=",")
     if values.ndim == 1:
         values = values[:, None]
 

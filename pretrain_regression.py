@@ -154,4 +154,15 @@ trained_model, loss = train(
     ckpt=ckpt,
 )
 
-torch.save(trained_model.to("cpu").state_dict(), args.saveweights)
+trained_model = trained_model.to("cpu")
+checkpoint_payload = {
+    "architecture": {
+        "num_layers": int(trained_model.num_layers),
+        "embedding_size": int(trained_model.embedding_size),
+        "num_attention_heads": int(trained_model.num_attention_heads),
+        "mlp_hidden_size": int(trained_model.mlp_hidden_size),
+        "num_outputs": int(trained_model.num_outputs),
+    },
+    "model": trained_model.state_dict(),
+}
+torch.save(checkpoint_payload, args.saveweights)
