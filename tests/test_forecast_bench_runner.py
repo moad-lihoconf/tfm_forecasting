@@ -157,3 +157,76 @@ def test_run_benchmark_writes_artifacts(monkeypatch, tmp_path: Path):
     assert artifacts.report_path.exists()
     assert artifacts.regression_rows_path.exists()
     assert artifacts.regression_summary_path.exists()
+
+
+def test_nicl_rows_budget_limits_regression_calls(tmp_path: Path):
+    cfg = ForecastBenchmarkConfig.from_dict(
+        {
+            **_make_cfg(tmp_path).to_dict(),
+            "models": {
+                "nicl_regression_mode": "native",
+                "nicl_regression_endpoint": "https://example.com/reg",
+                "nicl_max_rows_budget": 18,
+            },
+        }
+    )
+    series = np.stack(
+        [
+            np.linspace(0.0, 1.0, 220),
+            np.linspace(1.0, 2.0, 220),
+        ],
+        axis=0,
+    )
+    suite = {
+        "dummy": DatasetBundle(
+            name="dummy",
+            series=series,
+            frequency="daily",
+            seasonality=7,
+            skipped=False,
+            skip_reason=None,
+        )
+    }
+    adapters = {
+        "nanotabpfn_standard": _MeanAdapter(),
+        "nanotabpfn_dynscm": _LastLagAdapter(),
+        "tabicl_regressor": _MeanAdapter(),
+        "nicl_regression": _MeanAdapter(),
+    }
+    rows = evaluate_regression(cfg, suite=suite, adapters=adapters)
+    nicl_rows = rows.loc[rows["model"] == "nicl_regression"]
+    assert (nicl_rows["status"] == "ok").sum() >= 1
+    assert (nicl_rows["status"] == "skipped").sum() >= 1
+    assert any(
+        "budget exceeded" in reason
+        for reason in nicl_rows.loc[nicl_rows["status"] == "skipped", "skip_reason"]
+    )
+
+
+def test_strict_nicl_unavailable_raises(tmp_path: Path):
+    cfg = ForecastBenchmarkConfig.from_dict(
+        {
+            **_make_cfg(tmp_path).to_dict(),
+            "models": {
+                "nicl_regression_mode": "native",
+                "nicl_fail_on_unavailable": True,
+                # no endpoint -> unavailable adapter
+            },
+        }
+    )
+    suite = {
+        "dummy": DatasetBundle(
+            name="dummy",
+            series=np.linspace(0.0, 1.0, 220)[None, :],
+            frequency="daily",
+            seasonality=7,
+            skipped=False,
+            skip_reason=None,
+        )
+    }
+    import pytest
+
+    with pytest.raises(
+        RuntimeError, match="NICL regression is enabled but unavailable"
+    ):
+        evaluate_regression(cfg, suite=suite, adapters=None, device="cpu")

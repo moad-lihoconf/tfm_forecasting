@@ -43,6 +43,11 @@ def test_build_markdown_report_both_tracks():
             "required_metric_passes": 2,
             "achieved_metric_passes": 3,
         },
+        "nicl_regression": {"ok_rows": 5, "skipped_rows": 1},
+        "nicl_capabilities": {
+            "regression_mode": "native",
+            "regression_endpoint": "https://example.com/reg",
+        },
         "comparisons": [
             {
                 "baseline": "nanotabpfn_standard",
@@ -74,6 +79,7 @@ def test_build_markdown_report_both_tracks():
     assert "Proxy Classification Track" in report
     assert "nanotabpfn_standard" in report
     assert "nanotabpfn_classifier" in report
+    assert "NICL regression rows" in report
 
 
 def test_build_markdown_report_no_outputs():

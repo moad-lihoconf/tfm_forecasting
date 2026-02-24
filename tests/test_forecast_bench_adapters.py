@@ -7,6 +7,7 @@ from tfmplayground.benchmarks.forecasting.adapters import (
     AdapterSkipError,
     NanoTabPFNForecastAdapter,
     NICLClientAdapter,
+    NICLRegressionAdapter,
     build_forecast_table_from_series,
     default_regression_adapters,
 )
@@ -77,6 +78,7 @@ def test_default_regression_adapters_marks_dynscm_as_unavailable_when_missing_ck
 
 
 def test_nicl_adapter_requires_token(monkeypatch):
+    monkeypatch.delenv("NEURALK_API_KEY", raising=False)
     monkeypatch.delenv("NICL_API_TOKEN", raising=False)
     adapter = NICLClientAdapter(
         api_url="https://example.com",
@@ -115,7 +117,7 @@ class _FakeSession:
 
 
 def test_nicl_adapter_parses_response(monkeypatch):
-    monkeypatch.setenv("NICL_API_TOKEN", "secret")
+    monkeypatch.setenv("NEURALK_API_KEY", "secret")
     adapter = NICLClientAdapter(
         api_url="https://example.com",
         timeout_seconds=1.0,
@@ -131,3 +133,70 @@ def test_nicl_adapter_parses_response(monkeypatch):
     )
     assert pred.shape == (2,)
     assert proba.shape == (2, 2)
+
+
+class _CaptureSession:
+    def __init__(self, payload):
+        self.payload = payload
+        self.requests = []
+
+    def post(self, *args, **kwargs):
+        self.requests.append(kwargs.get("json", {}))
+        return _FakeResponse(self.payload)
+
+
+def test_nicl_regression_native_parses_float_predictions(monkeypatch):
+    monkeypatch.setenv("NEURALK_API_KEY", "secret")
+    session = _CaptureSession({"predictions": [1.5, 2.5, 3.5]})
+    adapter = NICLRegressionAdapter(
+        api_url="https://example.com/reg",
+        timeout_seconds=1.0,
+        max_retries=1,
+        mode="native",
+        session=session,
+    )
+    pred = adapter.fit_predict(
+        np.zeros((4, 3), dtype=np.float64),
+        np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float64),
+        np.zeros((3, 3), dtype=np.float64),
+    )
+    assert pred.shape == (3,)
+    assert np.allclose(pred, [1.5, 2.5, 3.5])
+    assert session.requests[0]["task"] == "regression"
+
+
+def test_nicl_regression_quantized_proxy_uses_train_only_binning(monkeypatch):
+    monkeypatch.setenv("NEURALK_API_KEY", "secret")
+    session = _CaptureSession(
+        {
+            "probabilities": [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            "predictions": [0, 3],
+        }
+    )
+    adapter = NICLRegressionAdapter(
+        api_url="https://example.com/cls",
+        timeout_seconds=1.0,
+        max_retries=1,
+        mode="quantized_proxy",
+        session=session,
+        proxy_num_classes=4,
+        min_samples_per_class=1,
+    )
+    y_train = np.array([0.0, 0.1, 0.2, 0.3, 0.4, 0.5], dtype=np.float64)
+    pred = adapter.fit_predict(
+        np.zeros((6, 3), dtype=np.float64),
+        y_train,
+        np.zeros((2, 3), dtype=np.float64),
+    )
+    assert pred.shape == (2,)
+    assert np.isfinite(pred).all()
+    sent = session.requests[0]
+    assert sent["task"] == "classification"
+    assert "y_train" in sent
+    # no y_test leakage should ever be sent
+    assert "y_test" not in sent
+    # quantized classes should be integer encoded
+    assert all(isinstance(v, int) for v in sent["y_train"])
