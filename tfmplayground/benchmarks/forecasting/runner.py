@@ -136,7 +136,10 @@ def evaluate_regression(
             insample = _fill_nan_1d(series[: max_train_origin + 1])
 
             for model_name, model in model_adapters.items():
-                if model_name == _NICL_REGRESSION_MODEL and nicl_budget_rows is not None:
+                if (
+                    model_name == _NICL_REGRESSION_MODEL
+                    and nicl_budget_rows is not None
+                ):
                     rows_in_call = int(x_train.shape[0] + x_test.shape[0])
                     if nicl_rows_used + rows_in_call > nicl_budget_rows:
                         rows.append(
@@ -171,7 +174,10 @@ def evaluate_regression(
                     )
                     continue
 
-                if model_name == _NICL_REGRESSION_MODEL and nicl_budget_rows is not None:
+                if (
+                    model_name == _NICL_REGRESSION_MODEL
+                    and nicl_budget_rows is not None
+                ):
                     nicl_rows_used += int(x_train.shape[0] + x_test.shape[0])
 
                 for horizon in sorted(set(int(v) for v in h_test.tolist())):
@@ -633,7 +639,9 @@ def _summarize_nicl_regression(rows: pd.DataFrame) -> dict[str, Any]:
     ok_rows = nicl_rows.loc[nicl_rows["status"] == "ok"]
     skipped = nicl_rows.loc[nicl_rows["status"] == "skipped"]
     top_reasons = (
-        skipped["skip_reason"].value_counts().head(5).to_dict() if not skipped.empty else {}
+        skipped["skip_reason"].value_counts().head(5).to_dict()
+        if not skipped.empty
+        else {}
     )
     return {
         "present": True,
@@ -654,7 +662,10 @@ def _validate_nicl_regression_availability(
     if cfg.models.nicl_regression_mode == "off":
         return
     nicl_adapter = adapters.get(_NICL_REGRESSION_MODEL)
-    unavailable = nicl_adapter is None or nicl_adapter.__class__.__name__ == "UnavailableRegressionAdapter"
+    unavailable = (
+        nicl_adapter is None
+        or nicl_adapter.__class__.__name__ == "UnavailableRegressionAdapter"
+    )
     if unavailable and cfg.models.nicl_fail_on_unavailable:
         raise RuntimeError(
             "NICL regression is enabled but unavailable; "

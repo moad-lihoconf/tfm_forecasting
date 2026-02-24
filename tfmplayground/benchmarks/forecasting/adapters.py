@@ -454,7 +454,9 @@ class NICLRegressionAdapter:
             )
             y_train_cls = transform_to_classes(y_train_arr, edges)
         except Exception as exc:
-            raise AdapterSkipError(f"NICL quantized proxy binning failed: {exc}") from exc
+            raise AdapterSkipError(
+                f"NICL quantized proxy binning failed: {exc}"
+            ) from exc
 
         num_classes = int(edges.size - 1)
         payload = {
@@ -530,9 +532,7 @@ def _parse_nicl_regression_response(payload: dict[str, Any]) -> np.ndarray:
         None,
     )
     if raw is None:
-        raise AdapterSkipError(
-            "NICL regression response missing predictions field."
-        )
+        raise AdapterSkipError("NICL regression response missing predictions field.")
     pred = np.asarray(raw, dtype=np.float64).reshape(-1)
     if not np.isfinite(pred).all():
         raise AdapterSkipError("NICL regression predictions contain non-finite values.")
