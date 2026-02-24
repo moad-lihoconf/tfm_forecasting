@@ -19,7 +19,11 @@ from tfmplayground.priors.dynscm.config import DynSCMConfig
 from tfmplayground.priors.dynscm.features import build_forecasting_table
 
 from .config import ForecastBenchmarkConfig
-from .proxy_classification import fit_quantile_binner, transform_to_classes
+from .proxy_classification import (
+    choose_num_classes,
+    fit_quantile_binner,
+    transform_to_classes,
+)
 
 _CRITICAL_EXCEPTIONS = (KeyboardInterrupt, SystemExit, MemoryError)
 
@@ -389,7 +393,7 @@ class NICLRegressionAdapter:
         mode: str,
         token_env: str = "NEURALK_API_KEY",
         model_name: str = "nicl-small",
-        proxy_num_classes: int = 8,
+        proxy_num_classes: int | str = "auto",
         min_samples_per_class: int = 2,
         session: requests.Session | None = None,
     ):
@@ -402,7 +406,9 @@ class NICLRegressionAdapter:
         self.mode = mode
         self.token_env = token_env
         self.model_name = model_name
-        self.proxy_num_classes = int(proxy_num_classes)
+        if isinstance(proxy_num_classes, str) and proxy_num_classes != "auto":
+            raise ValueError("proxy_num_classes must be an int or the string 'auto'.")
+        self.proxy_num_classes = proxy_num_classes
         self.min_samples_per_class = int(min_samples_per_class)
         self.session = session or requests.Session()
 
@@ -447,9 +453,19 @@ class NICLRegressionAdapter:
         y_train_arr = np.asarray(y_train, dtype=np.float64)
 
         try:
+            requested = (
+                self.proxy_num_classes
+                if self.proxy_num_classes == "auto"
+                else int(self.proxy_num_classes)
+            )
+            selected_num_classes = choose_num_classes(
+                y_train_arr,
+                num_classes=requested,
+                min_samples_per_class=self.min_samples_per_class,
+            )
             edges = fit_quantile_binner(
                 y_train_arr,
-                num_classes=self.proxy_num_classes,
+                num_classes=selected_num_classes,
                 min_samples_per_class=self.min_samples_per_class,
             )
             y_train_cls = transform_to_classes(y_train_arr, edges)

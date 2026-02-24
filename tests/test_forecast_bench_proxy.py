@@ -5,6 +5,7 @@ import numpy as np
 from tfmplayground.benchmarks.forecasting.config import ForecastBenchmarkConfig
 from tfmplayground.benchmarks.forecasting.datasets import DatasetBundle
 from tfmplayground.benchmarks.forecasting.proxy_classification import (
+    choose_num_classes,
     fit_quantile_binner,
     transform_to_classes,
 )
@@ -40,6 +41,11 @@ def _make_cfg() -> ForecastBenchmarkConfig:
     )
 
 
+def test_proxy_config_accepts_auto_num_classes():
+    cfg = ForecastBenchmarkConfig()
+    assert cfg.proxy.num_classes == "auto"
+
+
 def test_quantile_binner_uses_train_distribution_only():
     y_train = np.array([0.0, 1.0, 2.0, 3.0, 4.0])
     edges = fit_quantile_binner(y_train, num_classes=3, min_samples_per_class=1)
@@ -49,6 +55,24 @@ def test_quantile_binner_uses_train_distribution_only():
     assert labels.shape == (4,)
     assert labels.min() >= 0
     assert labels.max() <= 2
+
+
+def test_choose_num_classes_auto_and_feasibility_cap():
+    y_train = np.linspace(0.0, 1.0, 32)
+    picked = choose_num_classes(
+        y_train,
+        num_classes="auto",
+        min_samples_per_class=4,
+    )
+    # auto can vary with heuristic constant, but must stay feasible.
+    assert 2 <= picked <= 8
+
+    capped = choose_num_classes(
+        y_train,
+        num_classes=20,
+        min_samples_per_class=4,
+    )
+    assert capped == 8
 
 
 def test_evaluate_proxy_and_summary_with_dummy_adapters():

@@ -31,7 +31,11 @@ from .metrics import (
     relative_improvement,
 )
 from .protocol import generate_rolling_origin_indices
-from .proxy_classification import fit_quantile_binner, transform_to_classes
+from .proxy_classification import (
+    choose_num_classes,
+    fit_quantile_binner,
+    transform_to_classes,
+)
 from .report import build_markdown_report, write_json
 
 
@@ -277,9 +281,14 @@ def evaluate_proxy(
             h_test = table.h_idx[split:]
 
             try:
-                bin_edges = fit_quantile_binner(
+                selected_num_classes = choose_num_classes(
                     y_train_cont,
                     num_classes=cfg.proxy.num_classes,
+                    min_samples_per_class=cfg.proxy.min_samples_per_class,
+                )
+                bin_edges = fit_quantile_binner(
+                    y_train_cont,
+                    num_classes=selected_num_classes,
                     min_samples_per_class=cfg.proxy.min_samples_per_class,
                 )
                 y_train = transform_to_classes(y_train_cont, bin_edges)

@@ -100,8 +100,17 @@ class StatisticsConfig(_FrozenConfigModel):
 class ProxyConfig(_FrozenConfigModel):
     """Proxy classification benchmark settings."""
 
-    num_classes: int = Field(default=4, ge=2)
+    num_classes: int | Literal["auto"] = "auto"
     min_samples_per_class: int = Field(default=4, ge=1)
+
+    @field_validator("num_classes")
+    @classmethod
+    def _validate_num_classes(
+        cls, value: int | Literal["auto"]
+    ) -> int | Literal["auto"]:
+        if isinstance(value, int) and value < 2:
+            raise ValueError("num_classes must be >= 2, or 'auto'.")
+        return value
 
 
 class ForecastBenchmarkConfig(_FrozenConfigModel):

@@ -182,7 +182,7 @@ def test_nicl_regression_quantized_proxy_uses_train_only_binning(monkeypatch):
         max_retries=1,
         mode="quantized_proxy",
         session=session,
-        proxy_num_classes=4,
+        proxy_num_classes="auto",
         min_samples_per_class=1,
     )
     y_train = np.array([0.0, 0.1, 0.2, 0.3, 0.4, 0.5], dtype=np.float64)
@@ -196,7 +196,20 @@ def test_nicl_regression_quantized_proxy_uses_train_only_binning(monkeypatch):
     sent = session.requests[0]
     assert sent["task"] == "classification"
     assert "y_train" in sent
+    assert sent["num_classes"] >= 2
+    assert sent["num_classes"] <= len(y_train)
     # no y_test leakage should ever be sent
     assert "y_test" not in sent
     # quantized classes should be integer encoded
     assert all(isinstance(v, int) for v in sent["y_train"])
+
+
+def test_nicl_regression_rejects_invalid_proxy_num_classes_string():
+    with pytest.raises(ValueError, match="proxy_num_classes"):
+        NICLRegressionAdapter(
+            api_url="https://example.com/cls",
+            timeout_seconds=1.0,
+            max_retries=1,
+            mode="quantized_proxy",
+            proxy_num_classes="bad",
+        )
