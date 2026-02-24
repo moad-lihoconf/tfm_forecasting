@@ -22,3 +22,5 @@ __pycache__/
 uv.lock
 
 loc_*
+
+.env

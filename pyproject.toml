@@ -34,6 +34,7 @@ tabpfn-v1-prior = { git = "https://github.com/automl/tabpfn-v1-prior.git", branc
 wandb = { version = ">=0.20", optional = true }
 tensorboard = { version = ">=2.19", optional = true }
 pytest = "^9.0.2"
+neuralk = "^0.1.1"
 
 [tool.poetry.extras]
 wandb = ["wandb"]
