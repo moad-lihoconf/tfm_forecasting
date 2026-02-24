@@ -19,6 +19,7 @@ from tfmplayground.priors.dynscm.config import DynSCMConfig
 from tfmplayground.priors.dynscm.features import build_forecasting_table
 
 from .config import ForecastBenchmarkConfig
+from .proxy_classification import fit_quantile_binner, transform_to_classes
 
 _CRITICAL_EXCEPTIONS = (KeyboardInterrupt, SystemExit, MemoryError)
 
@@ -28,6 +29,7 @@ __all__ = [
     "build_forecast_table_from_series",
     "default_proxy_adapters",
     "default_regression_adapters",
+    "NICLRegressionAdapter",
 ]
 
 
@@ -317,7 +319,7 @@ class NICLClientAdapter:
         api_url: str,
         timeout_seconds: float,
         max_retries: int,
-        token_env: str = "NICL_API_TOKEN",
+        token_env: str = "NEURALK_API_KEY",
         session: requests.Session | None = None,
     ):
         self.name = "nicl_api"
@@ -335,9 +337,7 @@ class NICLClientAdapter:
         *,
         num_classes: int,
     ) -> tuple[np.ndarray, np.ndarray]:
-        token = os.getenv(self.token_env)
-        if not token:
-            raise AdapterSkipError(f"Missing NICL token in env var {self.token_env}.")
+        token = _resolve_nicl_token(self.token_env)
 
         payload = {
             "task": "classification",
@@ -362,7 +362,7 @@ class NICLClientAdapter:
                 )
                 response.raise_for_status()
                 result = response.json()
-                pred, proba = _parse_nicl_response(result)
+                pred, proba = _parse_nicl_classification_response(result)
                 if (
                     pred.shape[0] != x_test.shape[0]
                     or proba.shape[0] != x_test.shape[0]
@@ -377,7 +377,121 @@ class NICLClientAdapter:
         raise AdapterSkipError(f"NICL request failed after retries: {last_error}")
 
 
-def _parse_nicl_response(payload: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+class NICLRegressionAdapter:
+    """NICL adapter for regression (`native`) or quantized proxy mode."""
+
+    def __init__(
+        self,
+        *,
+        api_url: str,
+        timeout_seconds: float,
+        max_retries: int,
+        mode: str,
+        token_env: str = "NEURALK_API_KEY",
+        model_name: str = "nicl-small",
+        proxy_num_classes: int = 8,
+        min_samples_per_class: int = 2,
+        session: requests.Session | None = None,
+    ):
+        if mode not in {"native", "quantized_proxy"}:
+            raise ValueError(f"Unsupported NICL regression mode: {mode!r}")
+        self.name = "nicl_regression"
+        self.api_url = api_url
+        self.timeout_seconds = float(timeout_seconds)
+        self.max_retries = int(max_retries)
+        self.mode = mode
+        self.token_env = token_env
+        self.model_name = model_name
+        self.proxy_num_classes = int(proxy_num_classes)
+        self.min_samples_per_class = int(min_samples_per_class)
+        self.session = session or requests.Session()
+
+    def fit_predict(
+        self, x_train: np.ndarray, y_train: np.ndarray, x_test: np.ndarray
+    ) -> np.ndarray:
+        if self.mode == "native":
+            return self._fit_predict_native(x_train, y_train, x_test)
+        return self._fit_predict_quantized_proxy(x_train, y_train, x_test)
+
+    def _fit_predict_native(
+        self, x_train: np.ndarray, y_train: np.ndarray, x_test: np.ndarray
+    ) -> np.ndarray:
+        token = _resolve_nicl_token(self.token_env)
+        payload = {
+            "task": "regression",
+            "model": self.model_name,
+            "x_train": np.asarray(x_train, dtype=np.float64).tolist(),
+            "y_train": np.asarray(y_train, dtype=np.float64).tolist(),
+            "x_test": np.asarray(x_test, dtype=np.float64).tolist(),
+        }
+        result = _nicl_post_json(
+            session=self.session,
+            url=self.api_url,
+            payload=payload,
+            token=token,
+            timeout_seconds=self.timeout_seconds,
+            max_retries=self.max_retries,
+        )
+        pred = _parse_nicl_regression_response(result)
+        if pred.shape != (x_test.shape[0],):
+            raise AdapterSkipError(
+                "NICL regression response shape mismatch: "
+                f"pred={pred.shape} expected={(x_test.shape[0],)}"
+            )
+        return pred
+
+    def _fit_predict_quantized_proxy(
+        self, x_train: np.ndarray, y_train: np.ndarray, x_test: np.ndarray
+    ) -> np.ndarray:
+        token = _resolve_nicl_token(self.token_env)
+        y_train_arr = np.asarray(y_train, dtype=np.float64)
+
+        try:
+            edges = fit_quantile_binner(
+                y_train_arr,
+                num_classes=self.proxy_num_classes,
+                min_samples_per_class=self.min_samples_per_class,
+            )
+            y_train_cls = transform_to_classes(y_train_arr, edges)
+        except Exception as exc:
+            raise AdapterSkipError(f"NICL quantized proxy binning failed: {exc}") from exc
+
+        num_classes = int(edges.size - 1)
+        payload = {
+            "task": "classification",
+            "model": self.model_name,
+            "x_train": np.asarray(x_train, dtype=np.float64).tolist(),
+            "y_train": np.asarray(y_train_cls, dtype=np.int64).tolist(),
+            "x_test": np.asarray(x_test, dtype=np.float64).tolist(),
+            "num_classes": num_classes,
+        }
+        result = _nicl_post_json(
+            session=self.session,
+            url=self.api_url,
+            payload=payload,
+            token=token,
+            timeout_seconds=self.timeout_seconds,
+            max_retries=self.max_retries,
+        )
+        pred_cls, proba = _parse_nicl_classification_response(result)
+
+        centers = _compute_train_bin_centers(y_train_arr, y_train_cls, num_classes)
+        pred = _classification_outputs_to_regression(
+            pred_cls=pred_cls,
+            proba=proba,
+            centers=centers,
+        )
+        if pred.shape != (x_test.shape[0],):
+            raise AdapterSkipError(
+                "NICL quantized proxy response shape mismatch: "
+                f"pred={pred.shape} expected={(x_test.shape[0],)}"
+            )
+        return pred
+
+
+def _parse_nicl_classification_response(
+    payload: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray]:
     proba_raw = next(
         (
             payload[k]
@@ -404,6 +518,106 @@ def _parse_nicl_response(payload: dict[str, Any]) -> tuple[np.ndarray, np.ndarra
         pred = np.asarray(pred_raw, dtype=np.int64)
 
     return pred, proba
+
+
+def _parse_nicl_regression_response(payload: dict[str, Any]) -> np.ndarray:
+    raw = next(
+        (
+            payload[k]
+            for k in ("predictions", "y_pred", "values", "prediction")
+            if k in payload
+        ),
+        None,
+    )
+    if raw is None:
+        raise AdapterSkipError(
+            "NICL regression response missing predictions field."
+        )
+    pred = np.asarray(raw, dtype=np.float64).reshape(-1)
+    if not np.isfinite(pred).all():
+        raise AdapterSkipError("NICL regression predictions contain non-finite values.")
+    return pred
+
+
+def _nicl_post_json(
+    *,
+    session: requests.Session,
+    url: str,
+    payload: dict[str, Any],
+    token: str,
+    timeout_seconds: float,
+    max_retries: int,
+) -> dict[str, Any]:
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    last_error: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            response = session.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=timeout_seconds,
+            )
+            response.raise_for_status()
+            result = response.json()
+            if not isinstance(result, dict):
+                raise ValueError("NICL response must be a JSON object.")
+            return result
+        except Exception as exc:  # pragma: no cover
+            last_error = exc
+            if attempt + 1 < max_retries:
+                time.sleep(0.5 * (2**attempt))
+    raise AdapterSkipError(f"NICL request failed after retries: {last_error}")
+
+
+def _resolve_nicl_token(token_env: str) -> str:
+    token = os.getenv(token_env)
+    if token:
+        return token
+    # Backward-compatible fallback for existing local setups.
+    if token_env != "NICL_API_TOKEN":
+        fallback = os.getenv("NICL_API_TOKEN")
+        if fallback:
+            return fallback
+    raise AdapterSkipError(
+        f"Missing NICL token in env var {token_env} (or NICL_API_TOKEN fallback)."
+    )
+
+
+def _compute_train_bin_centers(
+    y_train: np.ndarray,
+    y_train_cls: np.ndarray,
+    num_classes: int,
+) -> np.ndarray:
+    centers = np.zeros((num_classes,), dtype=np.float64)
+    global_mean = float(np.mean(y_train)) if y_train.size else 0.0
+    for cls in range(num_classes):
+        mask = y_train_cls == cls
+        if np.any(mask):
+            centers[cls] = float(np.mean(y_train[mask]))
+        else:
+            centers[cls] = global_mean
+    return centers
+
+
+def _classification_outputs_to_regression(
+    *,
+    pred_cls: np.ndarray,
+    proba: np.ndarray,
+    centers: np.ndarray,
+) -> np.ndarray:
+    pred_cls_arr = np.asarray(pred_cls, dtype=np.int64).reshape(-1)
+    proba_arr = np.asarray(proba, dtype=np.float64)
+
+    if proba_arr.ndim == 2 and proba_arr.shape[1] == centers.shape[0]:
+        pred = proba_arr @ centers
+    else:
+        safe_cls = np.clip(pred_cls_arr, 0, centers.shape[0] - 1)
+        pred = centers[safe_cls]
+    return np.asarray(pred, dtype=np.float64).reshape(-1)
 
 
 class UnavailableRegressionAdapter:
@@ -452,6 +666,24 @@ def default_regression_adapters(
             device=device,
         )
 
+    if cfg.models.nicl_regression_mode != "off":
+        if cfg.models.nicl_regression_endpoint is None:
+            adapters["nicl_regression"] = UnavailableRegressionAdapter(
+                "nicl_regression",
+                "nicl_regression_endpoint is not configured.",
+            )
+        else:
+            adapters["nicl_regression"] = NICLRegressionAdapter(
+                api_url=cfg.models.nicl_regression_endpoint,
+                timeout_seconds=cfg.models.nicl_timeout_seconds,
+                max_retries=cfg.models.nicl_max_retries,
+                mode=cfg.models.nicl_regression_mode,
+                token_env=cfg.models.nicl_api_key_env,
+                model_name=cfg.models.nicl_model,
+                proxy_num_classes=cfg.proxy.num_classes,
+                min_samples_per_class=cfg.proxy.min_samples_per_class,
+            )
+
     return adapters
 
 
@@ -476,5 +708,6 @@ def default_proxy_adapters(
             api_url=cfg.models.nicl_api_url,
             timeout_seconds=cfg.models.nicl_timeout_seconds,
             max_retries=cfg.models.nicl_max_retries,
+            token_env=cfg.models.nicl_api_key_env,
         ),
     }

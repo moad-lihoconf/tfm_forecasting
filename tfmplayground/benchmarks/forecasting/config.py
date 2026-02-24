@@ -78,6 +78,12 @@ class ModelConfig(_FrozenConfigModel):
     tabicl_checkpoint_version: str = "tabicl-regressor-v2-20260212.ckpt"
     tabicl_model_path: str | None = None
     nicl_api_url: str = "https://prediction.neuralk-ai.com/predict"
+    nicl_regression_mode: Literal["off", "native", "quantized_proxy"] = "off"
+    nicl_regression_endpoint: str | None = None
+    nicl_model: str = "nicl-small"
+    nicl_api_key_env: str = "NEURALK_API_KEY"
+    nicl_max_rows_budget: int | None = Field(default=None, ge=1)
+    nicl_fail_on_unavailable: bool = False
     nicl_timeout_seconds: float = Field(default=20.0, gt=0.0)
     nicl_max_retries: int = Field(default=3, ge=1)
 

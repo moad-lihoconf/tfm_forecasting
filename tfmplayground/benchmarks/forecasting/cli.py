@@ -56,6 +56,29 @@ def _build_parser() -> argparse.ArgumentParser:
         help="TabICL checkpoint version identifier.",
     )
     parser.add_argument(
+        "--nicl_regression_mode",
+        choices=["off", "native", "quantized_proxy"],
+        default=None,
+        help="Enable NICL regression adapter mode.",
+    )
+    parser.add_argument(
+        "--nicl_regression_endpoint",
+        type=str,
+        default=None,
+        help="NICL regression endpoint URL.",
+    )
+    parser.add_argument(
+        "--nicl_max_rows_budget",
+        type=int,
+        default=None,
+        help="Optional total rows budget for NICL regression calls.",
+    )
+    parser.add_argument(
+        "--nicl_fail_on_unavailable",
+        action="store_true",
+        help="Fail benchmark if NICL regression is enabled but unavailable.",
+    )
+    parser.add_argument(
         "--output_dir",
         type=str,
         default=None,
@@ -91,10 +114,15 @@ def _load_config(args: argparse.Namespace) -> ForecastBenchmarkConfig:
         ("model_dynscm_ckpt", "model_dynscm_ckpt"),
         ("model_dynscm_dist", "model_dynscm_dist"),
         ("tabicl_checkpoint_version", "tabicl_checkpoint_version"),
+        ("nicl_regression_mode", "nicl_regression_mode"),
+        ("nicl_regression_endpoint", "nicl_regression_endpoint"),
+        ("nicl_max_rows_budget", "nicl_max_rows_budget"),
     ):
         value = getattr(args, arg_name)
         if value is not None:
             models_payload[model_key] = value
+    if args.nicl_fail_on_unavailable:
+        models_payload["nicl_fail_on_unavailable"] = True
     payload["models"] = models_payload
 
     return ForecastBenchmarkConfig.from_dict(payload)

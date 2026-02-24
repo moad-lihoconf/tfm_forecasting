@@ -65,6 +65,20 @@ def _render_regression_summary(summary: dict[str, Any]) -> list[str]:
         "- Achieved passing metrics vs standard baseline: "
         f"`{claim.get('achieved_metric_passes', 0)}`"
     )
+    nicl_status = summary.get("nicl_regression", {})
+    if nicl_status:
+        lines.append(
+            "- NICL regression rows: "
+            f"`ok={nicl_status.get('ok_rows', 0)}`, "
+            f"`skipped={nicl_status.get('skipped_rows', 0)}`"
+        )
+    nicl_caps = summary.get("nicl_capabilities", {})
+    if nicl_caps:
+        lines.append(
+            "- NICL mode/endpoint: "
+            f"`{nicl_caps.get('regression_mode', 'off')}` / "
+            f"`{nicl_caps.get('regression_endpoint')}`"
+        )
     lines.append("")
 
     comparisons = summary.get("comparisons", [])

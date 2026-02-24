@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ import pandas as pd
 _CANDIDATE_MODEL = "nanotabpfn_dynscm"
 _BASELINE_MODELS = ("nanotabpfn_standard", "tabicl_regressor")
 _PRIMARY_BASELINE = "nanotabpfn_standard"
+_NICL_REGRESSION_MODEL = "nicl_regression"
 
 from .adapters import (
     AdapterSkipError,
@@ -62,9 +64,12 @@ def evaluate_regression(
         if adapters is None
         else adapters
     )
+    _validate_nicl_regression_availability(cfg=cfg, adapters=model_adapters)
 
     rows: list[dict[str, Any]] = []
     required_lag = cfg.protocol.required_lag
+    nicl_budget_rows = cfg.models.nicl_max_rows_budget
+    nicl_rows_used = 0
 
     for dataset_name, bundle in loaded_suite.items():
         if bundle.skipped:
@@ -131,6 +136,22 @@ def evaluate_regression(
             insample = _fill_nan_1d(series[: max_train_origin + 1])
 
             for model_name, model in model_adapters.items():
+                if model_name == _NICL_REGRESSION_MODEL and nicl_budget_rows is not None:
+                    rows_in_call = int(x_train.shape[0] + x_test.shape[0])
+                    if nicl_rows_used + rows_in_call > nicl_budget_rows:
+                        rows.append(
+                            _regression_skip_row(
+                                dataset=dataset_name,
+                                model=model_name,
+                                reason=(
+                                    "NICL regression rows budget exceeded: "
+                                    f"used={nicl_rows_used}, need={rows_in_call}, "
+                                    f"budget={nicl_budget_rows}"
+                                ),
+                                series_id=series_id,
+                            )
+                        )
+                        continue
                 try:
                     pred = np.asarray(
                         model.fit_predict(x_train, y_train, x_test), dtype=np.float64
@@ -149,6 +170,9 @@ def evaluate_regression(
                         )
                     )
                     continue
+
+                if model_name == _NICL_REGRESSION_MODEL and nicl_budget_rows is not None:
+                    nicl_rows_used += int(x_train.shape[0] + x_test.shape[0])
 
                 for horizon in sorted(set(int(v) for v in h_test.tolist())):
                     mask = h_test == horizon
@@ -359,10 +383,13 @@ def run_benchmark(
     proxy_summary_path: Path | None = None
 
     suite = load_suite(cfg)
+    nicl_capabilities = _build_nicl_capabilities(cfg)
+    write_json(output_dir / "nicl_capabilities.json", nicl_capabilities)
 
     if cfg.mode in {"regression", "both"}:
         regression_rows = evaluate_regression(cfg, suite=suite, device=device)
         regression_summary = summarize_regression(regression_rows, cfg)
+        regression_summary["nicl_capabilities"] = nicl_capabilities
 
         regression_rows_path = output_dir / "regression_rows.csv"
         regression_summary_path = output_dir / "regression_summary.json"
@@ -514,6 +541,7 @@ def summarize_regression(
     return {
         "comparisons": comparisons,
         "claim": claim,
+        "nicl_regression": _summarize_nicl_regression(rows),
     }
 
 
@@ -591,6 +619,62 @@ def _accepts_num_classes(adapter: Any) -> bool:
         return False
     sig = inspect.signature(method)
     return "num_classes" in sig.parameters
+
+
+def _summarize_nicl_regression(rows: pd.DataFrame) -> dict[str, Any]:
+    nicl_rows = rows.loc[rows["model"] == _NICL_REGRESSION_MODEL]
+    if nicl_rows.empty:
+        return {
+            "present": False,
+            "ok_rows": 0,
+            "skipped_rows": 0,
+            "top_skip_reasons": [],
+        }
+    ok_rows = nicl_rows.loc[nicl_rows["status"] == "ok"]
+    skipped = nicl_rows.loc[nicl_rows["status"] == "skipped"]
+    top_reasons = (
+        skipped["skip_reason"].value_counts().head(5).to_dict() if not skipped.empty else {}
+    )
+    return {
+        "present": True,
+        "ok_rows": int(len(ok_rows)),
+        "skipped_rows": int(len(skipped)),
+        "top_skip_reasons": [
+            {"reason": str(reason), "count": int(count)}
+            for reason, count in top_reasons.items()
+        ],
+    }
+
+
+def _validate_nicl_regression_availability(
+    *,
+    cfg: ForecastBenchmarkConfig,
+    adapters: dict[str, Any],
+) -> None:
+    if cfg.models.nicl_regression_mode == "off":
+        return
+    nicl_adapter = adapters.get(_NICL_REGRESSION_MODEL)
+    unavailable = nicl_adapter is None or nicl_adapter.__class__.__name__ == "UnavailableRegressionAdapter"
+    if unavailable and cfg.models.nicl_fail_on_unavailable:
+        raise RuntimeError(
+            "NICL regression is enabled but unavailable; "
+            "set models.nicl_regression_endpoint and auth token, "
+            "or disable strict mode (nicl_fail_on_unavailable=False)."
+        )
+
+
+def _build_nicl_capabilities(cfg: ForecastBenchmarkConfig) -> dict[str, Any]:
+    token_primary = os.getenv(cfg.models.nicl_api_key_env)
+    token_fallback = os.getenv("NICL_API_TOKEN")
+    return {
+        "regression_mode": cfg.models.nicl_regression_mode,
+        "regression_endpoint": cfg.models.nicl_regression_endpoint,
+        "api_key_env": cfg.models.nicl_api_key_env,
+        "token_present_primary_env": bool(token_primary),
+        "token_present_nicl_api_token_fallback": bool(token_fallback),
+        "max_rows_budget": cfg.models.nicl_max_rows_budget,
+        "strict_unavailable": cfg.models.nicl_fail_on_unavailable,
+    }
 
 
 def _fill_nan_1d(values: np.ndarray) -> np.ndarray:
