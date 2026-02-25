@@ -686,18 +686,12 @@ def default_regression_adapters(
                 "nicl_regression",
                 "nicl_regression_endpoint is not configured.",
             )
-        elif cfg.models.nicl_regression_mode == "native":
-            adapters["nicl_regression"] = UnavailableRegressionAdapter(
-                "nicl_regression",
-                "NICL API currently supports only classification;"
-                " use quantized_proxy mode.",
-            )
         else:
             adapters["nicl_regression"] = NICLRegressionAdapter(
                 api_url=cfg.models.nicl_regression_endpoint,
                 timeout_seconds=cfg.models.nicl_timeout_seconds,
                 max_retries=cfg.models.nicl_max_retries,
-                mode=cfg.models.nicl_regression_mode,
+                mode="quantized_proxy",
                 token_env=cfg.models.nicl_api_key_env,
                 model_name=cfg.models.nicl_model,
                 proxy_num_classes=cfg.proxy.num_classes,
