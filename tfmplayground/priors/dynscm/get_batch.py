@@ -2,33 +2,58 @@
 
 from __future__ import annotations
 
+import contextlib
+import multiprocessing as mp
 from collections.abc import Callable, Mapping
+from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 import torch
 
 from .config import DynSCMConfig
-from .features import build_forecasting_table, sample_origins_and_horizons
-from .graph import sample_regime_graphs
-from .mechanisms import sample_regime_mechanisms
-from .missingness import sample_observation_mask
-from .simulate import simulate_dynscm_series
+from .parallel import (
+    DynSCMWorkerTask,
+    build_single_dynscm_sample,
+    compute_feasible_row_pairs,
+    draw_seed_bundles,
+    fit_feature_budget,
+    generate_dynscm_worker_sample,
+    init_dynscm_worker,
+    pad_rows_2d,
+    pad_rows_3d,
+    prioritize_feature_blocks,
+    required_min_series_length,
+    sample_dataset_dimensions,
+    slice_or_empty,
+)
 
 
-def make_get_batch_dynscm(
-    cfg: DynSCMConfig,
-    device: torch.device,
-    seed: int | None = None,
-) -> Callable[[int, int, int], dict[str, torch.Tensor | int]]:
-    """Return a stateful `get_batch` closure compatible with `PriorDataLoader`.
+class DynSCMBatchGenerator:
+    """Stateful callable that yields deterministic DynSCM prior batches."""
 
-    The closure keeps an internal RNG that advances per call, making successive
-    batches deterministic for a fixed `(cfg, seed)` pair.
-    """
-    target_device = torch.device(device)
-    state_rng = cfg.make_rng(seed)
+    def __init__(
+        self,
+        cfg: DynSCMConfig,
+        *,
+        device: torch.device,
+        seed: int | None = None,
+        workers: int = 1,
+        worker_blas_threads: int = 1,
+    ) -> None:
+        self.cfg = cfg
+        self.target_device = torch.device(device)
+        self.state_rng = cfg.make_rng(seed)
+        if workers < 1:
+            raise ValueError("workers must be >= 1.")
+        if worker_blas_threads < 1:
+            raise ValueError("worker_blas_threads must be >= 1.")
+        self.workers = int(workers)
+        self.worker_blas_threads = int(worker_blas_threads)
+        self._executor: ProcessPoolExecutor | None = None
+        self._row_pair_cache: dict[int, np.ndarray] = {}
 
-    def get_batch(
+    def __call__(
+        self,
         batch_size: int,
         num_datapoints_max: int,
         num_features: int,
@@ -41,79 +66,59 @@ def make_get_batch_dynscm(
             raise ValueError("num_features must be >= 1.")
 
         n_train, n_test = _sample_shared_row_counts(
-            cfg=cfg,
+            cfg=self.cfg,
             num_datapoints_max=num_datapoints_max,
-            rng=state_rng,
+            rng=self.state_rng,
+            cache=self._row_pair_cache,
         )
 
-        x_items: list[np.ndarray] = []
-        y_items: list[np.ndarray] = []
+        sample_seeds = draw_seed_bundles(
+            self.state_rng,
+            batch_size=batch_size,
+            bundle_width=1,
+        )[:, 0]
 
-        for _ in range(batch_size):
-            num_vars, num_steps, y_idx = _sample_dataset_dimensions(cfg, state_rng)
+        x_batch = np.empty(
+            (batch_size, num_datapoints_max, num_features),
+            dtype=np.float32,
+        )
+        y_batch = np.empty((batch_size, num_datapoints_max), dtype=np.float32)
 
-            graph_sample = sample_regime_graphs(
-                cfg,
-                num_vars=num_vars,
-                seed=_draw_seed(state_rng),
-            )
-            mechanism_sample = sample_regime_mechanisms(
-                cfg,
-                graph_sample,
-                seed=_draw_seed(state_rng),
-            )
-            simulation_sample = simulate_dynscm_series(
-                cfg,
-                graph_sample,
-                mechanism_sample,
-                num_steps=num_steps,
-                seed=_draw_seed(state_rng),
-            )
-
-            series = simulation_sample.series[None, :, :].astype(np.float64, copy=False)
-            y_index = np.array([y_idx], dtype=np.int64)
-
-            t_idx, h_idx = sample_origins_and_horizons(
-                cfg,
-                batch_size=1,
-                num_steps=num_steps,
-                n_train=n_train,
-                n_test=n_test,
-                seed=_draw_seed(state_rng),
-            )
-            obs_mask = sample_observation_mask(
-                cfg,
-                series,
-                seed=_draw_seed(state_rng),
-                label_times=t_idx + h_idx,
-                label_var_indices=y_index,
-            )
-
-            x_raw, y_raw, metadata = build_forecasting_table(
-                cfg,
-                series,
-                y_index,
-                n_train=n_train,
-                n_test=n_test,
-                t_idx=t_idx,
-                h_idx=h_idx,
-                obs_mask=obs_mask,
-                seed=_draw_seed(state_rng),
-            )
-
-            x_prioritized = _prioritize_feature_blocks(
-                x_raw,
-                feature_slices=metadata["feature_slices"],
-            )
-            x_budgeted = _fit_feature_budget(x_prioritized, num_features=num_features)
-            x_padded = _pad_rows_3d(x_budgeted, row_budget=num_datapoints_max)
-            y_padded = _pad_rows_2d(y_raw, row_budget=num_datapoints_max)
-
-            x_items.append(x_padded[0])
-            y_items.append(y_padded[0])
-
-        x_batch = np.stack(x_items, axis=0).astype(np.float32, copy=False)
-        y_batch = np.stack(y_items, axis=0).astype(np.float32, copy=False)
+        if self.workers == 1:
+            for idx, sample_seed in enumerate(sample_seeds):
+                x_i, y_i = build_single_dynscm_sample(
+                    self.cfg,
+                    sample_seed=int(sample_seed),
+                    n_train=n_train,
+                    n_test=n_test,
+                    row_budget=num_datapoints_max,
+                    num_features=num_features,
+                )
+                x_batch[idx] = x_i
+                y_batch[idx] = y_i
+        else:
+            tasks = [
+                DynSCMWorkerTask(
+                    sample_seed=int(sample_seed),
+                    n_train=n_train,
+                    n_test=n_test,
+                    row_budget=num_datapoints_max,
+                    num_features=num_features,
+                )
+                for sample_seed in sample_seeds
+            ]
+            try:
+                for idx, (x_i, y_i) in enumerate(
+                    self._get_executor().map(
+                        generate_dynscm_worker_sample,
+                        tasks,
+                        chunksize=1,
+                    )
+                ):
+                    x_batch[idx] = x_i
+                    y_batch[idx] = y_i
+            except Exception as exc:
+                raise RuntimeError("DynSCM parallel batch generation failed.") from exc
 
         if not np.isfinite(x_batch).all():
             raise RuntimeError(
@@ -122,8 +127,8 @@ def make_get_batch_dynscm(
         if not np.isfinite(y_batch).all():
             raise RuntimeError("DynSCM batch label tensor contains non-finite values.")
 
-        x_tensor = torch.from_numpy(x_batch).to(target_device)
-        y_tensor = torch.from_numpy(y_batch).to(target_device)
+        x_tensor = torch.from_numpy(x_batch).to(self.target_device)
+        y_tensor = torch.from_numpy(y_batch).to(self.target_device)
 
         return {
             "x": x_tensor,
@@ -132,7 +137,44 @@ def make_get_batch_dynscm(
             "single_eval_pos": int(n_train),
         }
 
-    return get_batch
+    def _get_executor(self) -> ProcessPoolExecutor:
+        if self._executor is not None:
+            return self._executor
+
+        self._executor = ProcessPoolExecutor(
+            max_workers=self.workers,
+            mp_context=mp.get_context("spawn"),
+            initializer=init_dynscm_worker,
+            initargs=(self.cfg.to_dict(), self.worker_blas_threads),
+        )
+        return self._executor
+
+    def close(self) -> None:
+        if self._executor is not None:
+            self._executor.shutdown(wait=True, cancel_futures=False)
+            self._executor = None
+
+    def __del__(self) -> None:
+        with contextlib.suppress(Exception):
+            self.close()
+
+
+def make_get_batch_dynscm(
+    cfg: DynSCMConfig,
+    device: torch.device,
+    seed: int | None = None,
+    *,
+    workers: int = 1,
+    worker_blas_threads: int = 1,
+) -> Callable[[int, int, int], dict[str, torch.Tensor | int]]:
+    """Return stateful DynSCM batch generator for `PriorDataLoader`."""
+    return DynSCMBatchGenerator(
+        cfg,
+        device=device,
+        seed=seed,
+        workers=workers,
+        worker_blas_threads=worker_blas_threads,
+    )
 
 
 def _sample_shared_row_counts(
@@ -140,59 +182,34 @@ def _sample_shared_row_counts(
     cfg: DynSCMConfig,
     num_datapoints_max: int,
     rng: np.random.Generator,
+    cache: dict[int, np.ndarray] | None = None,
 ) -> tuple[int, int]:
-    train_min = max(1, cfg.train_rows_min)
-    train_max = max(train_min, cfg.train_rows_max)
-    test_min = max(1, cfg.test_rows_min)
-    test_max = max(test_min, cfg.test_rows_max)
-
-    # O(train_range × test_range) enumeration; ~500 pairs with default config
-    # bounds.  Acceptable for prior sampling; consider caching if profiling
-    # shows overhead.
-    feasible_pairs = [
-        (n_train, n_test)
-        for n_train in range(train_min, train_max + 1)
-        for n_test in range(test_min, test_max + 1)
-        if n_train + n_test <= num_datapoints_max
-    ]
-    if not feasible_pairs:
-        raise ValueError(
-            "No feasible (n_train, n_test) pair satisfies config bounds and "
-            f"num_datapoints_max={num_datapoints_max}."
+    if cache is None:
+        feasible_pairs = compute_feasible_row_pairs(
+            cfg=cfg,
+            num_datapoints_max=num_datapoints_max,
         )
+    else:
+        if num_datapoints_max not in cache:
+            cache[num_datapoints_max] = compute_feasible_row_pairs(
+                cfg=cfg,
+                num_datapoints_max=num_datapoints_max,
+            )
+        feasible_pairs = cache[num_datapoints_max]
 
-    pair_idx = int(rng.integers(0, len(feasible_pairs)))
-    return feasible_pairs[pair_idx]
+    pair_idx = int(rng.integers(0, feasible_pairs.shape[0]))
+    return int(feasible_pairs[pair_idx, 0]), int(feasible_pairs[pair_idx, 1])
 
 
 def _required_min_series_length(cfg: DynSCMConfig) -> int:
-    required_lag = max(cfg.max_feature_lag, max(cfg.explicit_lags))
-    max_horizon = int(max(cfg.forecast_horizons))
-    return required_lag + max_horizon + 2
+    return required_min_series_length(cfg)
 
 
 def _sample_dataset_dimensions(
     cfg: DynSCMConfig,
     rng: np.random.Generator,
 ) -> tuple[int, int, int]:
-    num_vars = int(
-        rng.integers(
-            cfg.num_variables_min,
-            cfg.num_variables_max + 1,
-        )
-    )
-
-    series_len_min = max(cfg.series_length_min, _required_min_series_length(cfg))
-    series_len_max = cfg.series_length_max
-    if series_len_min > series_len_max:
-        raise ValueError(
-            "series_length_max is too small for feature/horizon safety: "
-            f"need at least {series_len_min}, got {series_len_max}."
-        )
-    num_steps = int(rng.integers(series_len_min, series_len_max + 1))
-
-    y_idx = int(rng.integers(0, num_vars))
-    return num_vars, num_steps, y_idx
+    return sample_dataset_dimensions(cfg, rng)
 
 
 def _slice_or_empty(
@@ -200,14 +217,7 @@ def _slice_or_empty(
     feature_slices: Mapping[str, tuple[int, int]],
     key: str,
 ) -> np.ndarray:
-    if key not in feature_slices:
-        return np.zeros((x.shape[0], x.shape[1], 0), dtype=x.dtype)
-    start, end = feature_slices[key]
-    start_idx = int(start)
-    end_idx = int(end)
-    if end_idx <= start_idx:
-        return np.zeros((x.shape[0], x.shape[1], 0), dtype=x.dtype)
-    return x[:, :, start_idx:end_idx]
+    return slice_or_empty(x, feature_slices, key)
 
 
 def _prioritize_feature_blocks(
@@ -215,50 +225,20 @@ def _prioritize_feature_blocks(
     *,
     feature_slices: Mapping[str, tuple[int, int]],
 ) -> np.ndarray:
-    """Return features ordered by deterministic priority for truncation safety.
-
-    Priority order:
-    1) deterministic channels (time/horizon/seasonality)
-    2) explicit lag values
-    3) kernel summary values
-    4) data mask channels
-    """
-    blocks = [
-        _slice_or_empty(x, feature_slices, "deterministic"),
-        _slice_or_empty(x, feature_slices, "lags_value"),
-        _slice_or_empty(x, feature_slices, "kern_value"),
-        _slice_or_empty(x, feature_slices, "data_mask"),
-    ]
-    non_empty = [block for block in blocks if block.shape[2] > 0]
-    if not non_empty:
-        return np.zeros((x.shape[0], x.shape[1], 0), dtype=x.dtype)
-    return np.concatenate(non_empty, axis=2)
+    return prioritize_feature_blocks(x, feature_slices=feature_slices)
 
 
 def _fit_feature_budget(x: np.ndarray, *, num_features: int) -> np.ndarray:
-    if x.shape[2] >= num_features:
-        return x[:, :, :num_features]
-    pad_width = num_features - x.shape[2]
-    return np.pad(x, ((0, 0), (0, 0), (0, pad_width)), mode="constant")
+    return fit_feature_budget(x, num_features=num_features)
 
 
 def _pad_rows_3d(x: np.ndarray, *, row_budget: int) -> np.ndarray:
-    if x.shape[1] > row_budget:
-        raise RuntimeError(f"Row count N={x.shape[1]} exceeds row_budget={row_budget}.")
-    if x.shape[1] == row_budget:
-        return x
-    pad_rows = row_budget - x.shape[1]
-    return np.pad(x, ((0, 0), (0, pad_rows), (0, 0)), mode="constant")
+    return pad_rows_3d(x, row_budget=row_budget)
 
 
 def _pad_rows_2d(y: np.ndarray, *, row_budget: int) -> np.ndarray:
-    if y.shape[1] > row_budget:
-        raise RuntimeError(f"Row count N={y.shape[1]} exceeds row_budget={row_budget}.")
-    if y.shape[1] == row_budget:
-        return y
-    pad_rows = row_budget - y.shape[1]
-    return np.pad(y, ((0, 0), (0, pad_rows)), mode="constant")
+    return pad_rows_2d(y, row_budget=row_budget)
 
 
 def _draw_seed(rng: np.random.Generator) -> int:
-    return int(rng.integers(0, np.iinfo(np.int64).max))
+    return int(draw_seed_bundles(rng, batch_size=1, bundle_width=1)[0, 0])

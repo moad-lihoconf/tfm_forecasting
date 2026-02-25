@@ -1,5 +1,6 @@
 """Data loading utilities for tabular priors."""
 
+import contextlib
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING
 
@@ -59,6 +60,15 @@ class PriorDataLoader(DataLoader):
 
     def __len__(self) -> int:
         return self.num_steps
+
+    def close(self) -> None:
+        close_fn = getattr(self.get_batch_function, "close", None)
+        if callable(close_fn):
+            close_fn()
+
+    def __del__(self) -> None:
+        with contextlib.suppress(Exception):
+            self.close()
 
 
 class PriorDumpDataLoader(DataLoader):
@@ -215,6 +225,8 @@ class DynSCMPriorDataLoader(PriorDataLoader):
         num_features: Number of input features.
         device: Target device for tensors.
         seed: Optional deterministic seed for closure RNG state.
+        workers: Number of process workers (1 keeps in-process generation).
+        worker_blas_threads: BLAS thread cap per worker process.
     """
 
     def __init__(
@@ -226,11 +238,19 @@ class DynSCMPriorDataLoader(PriorDataLoader):
         num_features: int,
         device: torch.device,
         seed: int | None = None,
+        workers: int = 1,
+        worker_blas_threads: int = 1,
     ):
         from .dynscm import make_get_batch_dynscm
 
         super().__init__(
-            get_batch_function=make_get_batch_dynscm(cfg, device=device, seed=seed),
+            get_batch_function=make_get_batch_dynscm(
+                cfg,
+                device=device,
+                seed=seed,
+                workers=workers,
+                worker_blas_threads=worker_blas_threads,
+            ),
             num_steps=num_steps,
             batch_size=batch_size,
             num_datapoints_max=num_datapoints_max,

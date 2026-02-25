@@ -13,11 +13,16 @@ DYN_BUCKETS="${DYN_BUCKETS:-${WORKDIR}/nanotabpfn_dynscm_buckets.pth}"
 STANDARD_CKPT="${STANDARD_CKPT:-nanotabpfn_weights.pth}"
 STANDARD_BUCKETS="${STANDARD_BUCKETS:-nanotabpfn_buckets.pth}"
 BENCH_OUT="${BENCH_OUT:-${WORKDIR}/benchmark}"
+DYN_WORKERS="${DYN_WORKERS:-1}"
+DYN_WORKER_BLAS_THREADS="${DYN_WORKER_BLAS_THREADS:-1}"
 
 echo "[1/4] Generate DynSCM prior dump"
 "${PYTHON_BIN}" -m tfmplayground.priors --lib dynscm \
   --num_batches 200 --batch_size 8 \
   --max_seq_len 64 --max_features 128 \
+  --dynscm_workers "${DYN_WORKERS}" \
+  --dynscm_worker_blas_threads "${DYN_WORKER_BLAS_THREADS}" \
+  --no_dynscm_compute_spectral_diagnostics \
   --max_classes 0 \
   --save_path "${DYN_DUMP}"
 

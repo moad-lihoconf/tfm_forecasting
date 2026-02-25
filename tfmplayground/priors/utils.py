@@ -152,20 +152,26 @@ def dump_prior_to_h5(
             if isinstance(single_eval_pos, torch.Tensor):
                 single_eval_pos = single_eval_pos.item()
 
-            # Pad x/y to maximum sequence length and feature count expected by
-            # downstream tabular prior loaders.
-            x_padded = np.pad(
-                x,
-                (
-                    (0, 0),
-                    (0, max_seq_len - x.shape[1]),
-                    (0, max_features - x.shape[2]),
-                ),
-                mode="constant",
-            )
-            y_padded = np.pad(
-                y, ((0, 0), (0, max_seq_len - y.shape[1])), mode="constant"
-            )
+            # Fast path: avoid redundant padding when tensors already match dump
+            # shapes. Fall back to zero-padding for variable-size batches.
+            if x.shape[1] == max_seq_len and x.shape[2] == max_features:
+                x_padded = x
+            else:
+                x_padded = np.pad(
+                    x,
+                    (
+                        (0, 0),
+                        (0, max_seq_len - x.shape[1]),
+                        (0, max_features - x.shape[2]),
+                    ),
+                    mode="constant",
+                )
+            if y.shape[1] == max_seq_len:
+                y_padded = y
+            else:
+                y_padded = np.pad(
+                    y, ((0, 0), (0, max_seq_len - y.shape[1])), mode="constant"
+                )
 
             dump_X.resize(dump_X.shape[0] + batch_size, axis=0)
             dump_X[-batch_size:] = x_padded

@@ -19,7 +19,7 @@ class DynSCMStabilitySample:
     lag_column_budgets: np.ndarray  # (K, p), per-target budgets for lag edges.
     contemp_column_budgets: np.ndarray  # (K, p), per-target budgets for cont. edges.
     spectral_rescale_factors: np.ndarray  # (K,), multiplicative lag rescale factors.
-    lag_spectral_radii: np.ndarray  # (K,), spectral radius after optional rescaling.
+    lag_spectral_radii: np.ndarray  # (K,), spectral radius diagnostics (or NaN).
 
     @property
     def num_regimes(self) -> int:
@@ -51,7 +51,10 @@ def sample_stable_coefficients(
     lag_column_budgets = np.zeros((num_regimes, num_vars), dtype=np.float64)
     contemp_column_budgets = np.zeros((num_regimes, num_vars), dtype=np.float64)
     spectral_rescale_factors = np.ones((num_regimes,), dtype=np.float64)
-    lag_spectral_radii = np.zeros((num_regimes,), dtype=np.float64)
+    lag_spectral_radii = np.full((num_regimes,), np.nan, dtype=np.float64)
+    compute_spectral_diagnostics = (
+        cfg.compute_spectral_diagnostics or cfg.enable_spectral_rescale
+    )
 
     for regime_idx in range(num_regimes):
         lag_budget = rng.uniform(
@@ -82,7 +85,7 @@ def sample_stable_coefficients(
             )
             spectral_rescale_factors[regime_idx] = scale
             lag_spectral_radii[regime_idx] = rho
-        else:
+        elif compute_spectral_diagnostics:
             lag_spectral_radii[regime_idx] = companion_spectral_radius(lag_block)
 
         lag_coeffs[regime_idx] = lag_block

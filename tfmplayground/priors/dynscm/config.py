@@ -116,6 +116,7 @@ class DynSCMStabilityConfig(_FrozenConfigModel):
     col_budget_max: float = Field(default=0.85, gt=0.0, lt=1.0)
     contemp_budget_max: float = Field(default=0.25, ge=0.0, lt=1.0)
     enable_spectral_rescale: bool = False
+    compute_spectral_diagnostics: bool = False
     spectral_radius_cap: float = Field(default=0.95, gt=0.0, lt=1.0)
 
     @model_validator(mode="after")

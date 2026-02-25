@@ -7,6 +7,12 @@ import pytest
 import torch
 
 
+def _close_if_supported(get_batch) -> None:
+    close_fn = getattr(get_batch, "close", None)
+    if callable(close_fn):
+        close_fn()
+
+
 @pytest.fixture(scope="module")
 def dynscm_api(dynscm_modules):
     return dynscm_modules["config"], dynscm_modules["get_batch"]
@@ -103,6 +109,60 @@ def test_make_get_batch_dynscm_is_deterministic_across_closures(dynscm_api):
     assert torch.equal(batch_a_2["y"], batch_b_2["y"])
     assert batch_a_2["single_eval_pos"] == batch_b_2["single_eval_pos"]
 
+    _close_if_supported(get_batch_a)
+    _close_if_supported(get_batch_b)
+
+
+def test_make_get_batch_dynscm_parallel_matches_serial(dynscm_api):
+    config_mod, get_batch_mod = dynscm_api
+    cfg = config_mod.DynSCMConfig.from_dict(
+        {
+            "num_variables_min": 3,
+            "num_variables_max": 4,
+            "series_length_min": 90,
+            "series_length_max": 100,
+            "max_lag": 5,
+            "mechanism_type": "linear_var",
+            "missing_mode": "mix",
+            "num_kernels": 1,
+            "train_rows_min": 6,
+            "train_rows_max": 8,
+            "test_rows_min": 3,
+            "test_rows_max": 4,
+        }
+    )
+
+    serial = get_batch_mod.make_get_batch_dynscm(
+        cfg,
+        device=torch.device("cpu"),
+        seed=41,
+        workers=1,
+        worker_blas_threads=1,
+    )
+    parallel = get_batch_mod.make_get_batch_dynscm(
+        cfg,
+        device=torch.device("cpu"),
+        seed=41,
+        workers=2,
+        worker_blas_threads=1,
+    )
+    try:
+        serial_1 = serial(batch_size=2, num_datapoints_max=20, num_features=24)
+        parallel_1 = parallel(batch_size=2, num_datapoints_max=20, num_features=24)
+        serial_2 = serial(batch_size=2, num_datapoints_max=20, num_features=24)
+        parallel_2 = parallel(batch_size=2, num_datapoints_max=20, num_features=24)
+    finally:
+        _close_if_supported(serial)
+        _close_if_supported(parallel)
+
+    assert torch.equal(serial_1["x"], parallel_1["x"])
+    assert torch.equal(serial_1["y"], parallel_1["y"])
+    assert serial_1["single_eval_pos"] == parallel_1["single_eval_pos"]
+
+    assert torch.equal(serial_2["x"], parallel_2["x"])
+    assert torch.equal(serial_2["y"], parallel_2["y"])
+    assert serial_2["single_eval_pos"] == parallel_2["single_eval_pos"]
+
 
 def test_feature_priority_truncation_order_is_deterministic(dynscm_api):
     _, get_batch_mod = dynscm_api
@@ -168,6 +228,14 @@ def test_get_batch_validates_inputs(dynscm_api):
     # Use valid config but num_datapoints_max too small for any feasible pair.
     with pytest.raises(ValueError, match="feasible"):
         get_batch(batch_size=1, num_datapoints_max=2, num_features=8)
+
+    with pytest.raises(ValueError, match="workers"):
+        get_batch_mod.make_get_batch_dynscm(
+            cfg,
+            device=torch.device("cpu"),
+            seed=99,
+            workers=0,
+        )
 
 
 @pytest.mark.parametrize(

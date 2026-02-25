@@ -111,6 +111,9 @@ python -m tfmplayground.priors --lib dynscm \
        --num_batches 1000 --batch_size 4 \
        --max_seq_len 64 --max_features 128 \
        --max_classes 0 \
+       --dynscm_workers 1 \
+       --dynscm_worker_blas_threads 1 \
+       --no_dynscm_compute_spectral_diagnostics \
        --dynscm_override num_variables_min=4 \
        --dynscm_override num_variables_max=8 \
        --dynscm_override num_regimes=3 \
@@ -122,6 +125,8 @@ You can optionally provide a full DynSCM JSON config and then patch fields with 
 python -m tfmplayground.priors --lib dynscm \
        --num_batches 250 --batch_size 8 \
        --max_seq_len 96 --max_features 128 \
+       --dynscm_workers 4 \
+       --dynscm_worker_blas_threads 1 \
        --dynscm_config_json path/to/dynscm_config.json \
        --dynscm_override features.num_kernels=2 \
        --dynscm_override missingness.missing_mode=\"mix\"
@@ -154,7 +159,7 @@ The DynSCM forecasting prior in `tfmplayground/priors/dynscm/` follows a direct 
 
 - `config.py`: all sampling knobs grouped by shape/regime/graph/mechanism/stability/noise/missingness/features/safety.
 - `graph.py`: regime-dependent causal graph sampling (contemporaneous + lagged supports).
-- `stability.py`: stable coefficient sampling and optional spectral rescaling.
+- `stability.py`: stable coefficient sampling, optional spectral rescaling, optional spectral diagnostics.
 - `mechanisms.py`: linear VAR core + optional residual nonlinear mechanism block.
 - `simulate.py`: forward rollout for multivariate regime-switching time series.
 - `missingness.py`: raw observation mask generation (`off`, `mcar`, `mar`, `mnar_lite`, `mix`) with outages.
@@ -193,8 +198,19 @@ batch = next(iter(prior))
 python -m tfmplayground.priors --lib dynscm \
   --num_batches 500 --batch_size 8 \
   --max_seq_len 64 --max_features 128 \
+  --dynscm_workers 4 \
+  --dynscm_worker_blas_threads 1 \
+  --no_dynscm_compute_spectral_diagnostics \
   --max_classes 0 \
   --save_path dynscm_dump.h5
+```
+- Throughput benchmark:
+```bash
+python scripts/benchmark_dynscm_generation.py \
+  --num_batches 20 --batch_size 4 \
+  --max_seq_len 64 --max_features 128 \
+  --workers 1 --worker_blas_threads 1 \
+  --seed 0 --profile_top 20
 ```
 - Train from dump:
 ```python

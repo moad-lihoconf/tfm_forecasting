@@ -178,6 +178,34 @@ def main():
             "Defaults to --np_seed when omitted."
         ),
     )
+    parser.add_argument(
+        "--dynscm_workers",
+        type=int,
+        default=1,
+        help="Number of process workers for DynSCM batch generation.",
+    )
+    parser.add_argument(
+        "--dynscm_worker_blas_threads",
+        type=int,
+        default=1,
+        help="BLAS thread cap applied inside each DynSCM worker process.",
+    )
+    parser.add_argument(
+        "--dynscm_compute_spectral_diagnostics",
+        dest="dynscm_compute_spectral_diagnostics",
+        action="store_true",
+        default=None,
+        help=(
+            "Compute spectral-radius diagnostics even when spectral rescaling "
+            "is disabled."
+        ),
+    )
+    parser.add_argument(
+        "--no_dynscm_compute_spectral_diagnostics",
+        dest="dynscm_compute_spectral_diagnostics",
+        action="store_false",
+        help="Disable optional spectral-radius diagnostics for DynSCM.",
+    )
 
     args = parser.parse_args()
 
@@ -192,6 +220,10 @@ def main():
 
     if args.lib == "dynscm" and args.max_classes != 0:
         parser.error("DynSCM currently supports regression only; use --max_classes 0.")
+    if args.dynscm_workers < 1:
+        parser.error("--dynscm_workers must be >= 1.")
+    if args.dynscm_worker_blas_threads < 1:
+        parser.error("--dynscm_worker_blas_threads must be >= 1.")
 
     device = torch.device(args.device)
     resolved_prior_type = args.prior_type if args.prior_type is not None else args.lib
@@ -238,6 +270,10 @@ def main():
             )
         except ValueError as exc:
             parser.error(f"Invalid DynSCM configuration: {exc}")
+        if args.dynscm_compute_spectral_diagnostics is not None:
+            dynscm_cfg = dynscm_cfg.with_overrides(
+                compute_spectral_diagnostics=args.dynscm_compute_spectral_diagnostics
+            )
 
         dynscm_seed = args.dynscm_seed
         if dynscm_seed is None:
@@ -251,6 +287,8 @@ def main():
             num_features=args.max_features,
             device=device,
             seed=dynscm_seed,
+            workers=args.dynscm_workers,
+            worker_blas_threads=args.dynscm_worker_blas_threads,
         )
     else:  # tabicl
         prior = TabICLPriorDataLoader(

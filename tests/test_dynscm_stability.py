@@ -56,6 +56,32 @@ def test_column_budget_support_and_budget_invariants(dynscm_api):
     assert np.all(cont_l1 <= sample.contemp_column_budgets + tol)
 
 
+def test_spectral_diagnostics_disabled_sets_nan_radii(dynscm_api):
+    config_mod, graph_mod, stability_mod = dynscm_api
+    cfg = config_mod.DynSCMConfig.from_dict(
+        {
+            "enable_spectral_rescale": False,
+            "compute_spectral_diagnostics": False,
+        }
+    )
+    graph = graph_mod.sample_regime_graphs(cfg, num_vars=7, seed=17)
+    sample = stability_mod.sample_stable_coefficients(cfg, graph, seed=18)
+    assert np.isnan(sample.lag_spectral_radii).all()
+
+
+def test_spectral_diagnostics_opt_in_computes_finite_radii(dynscm_api):
+    config_mod, graph_mod, stability_mod = dynscm_api
+    cfg = config_mod.DynSCMConfig.from_dict(
+        {
+            "enable_spectral_rescale": False,
+            "compute_spectral_diagnostics": True,
+        }
+    )
+    graph = graph_mod.sample_regime_graphs(cfg, num_vars=7, seed=19)
+    sample = stability_mod.sample_stable_coefficients(cfg, graph, seed=20)
+    assert np.isfinite(sample.lag_spectral_radii).all()
+
+
 def test_spectral_rescale_lag_block_reduces_radius(dynscm_api):
     _, _, stability_mod = dynscm_api
 
