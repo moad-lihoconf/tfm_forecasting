@@ -60,4 +60,5 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.mypy]
 python_version = "3.12"
 ignore_missing_imports = true
+disable_error_code = ["import-untyped"]
 warn_unused_ignores = true

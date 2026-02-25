@@ -66,7 +66,11 @@ class WandbLoggerCallback(BaseLoggerCallback):
     """Logger callback that logs epoch information to Weights & Biases."""
 
     def __init__(
-        self, project: str, name: str = None, config: dict = None, log_dir: str = None
+        self,
+        project: str,
+        name: str | None = None,
+        config: dict | None = None,
+        log_dir: str | None = None,
     ):
         """
         Initializes a WandbLoggerCallback.
@@ -74,7 +78,8 @@ class WandbLoggerCallback(BaseLoggerCallback):
         Args:
             project (str): The name of the wandb project.
             name (str, optional): The name of the run. Defaults to None.
-            config (dict, optional): Configuration dictionary for the run. Defaults to None.
+            config (dict, optional): Configuration dictionary
+                for the run. Defaults to None.
             log_dir (str, optional): Directory to save wandb logs. Defaults to None.
         """
         try:
@@ -89,7 +94,7 @@ class WandbLoggerCallback(BaseLoggerCallback):
                 dir=log_dir,
                 resume="allow",
             )
-        except ImportError:
+        except ImportError as e:
             raise ImportError(
                 "wandb is not installed. Install it with: pip install wandb"
             ) from e

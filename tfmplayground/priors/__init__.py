@@ -11,7 +11,7 @@ from .dynscm import DynSCMConfig, make_get_batch_dynscm
 from .utils import build_tabpfn_prior, build_ticl_prior
 
 try:
-    from .dataloader import TabPFNPriorDataLoader
+    from .dataloader import TabPFNPriorDataLoader  # type: ignore[attr-defined]
 except ImportError:  # pragma: no cover - legacy optional integration.
     TabPFNPriorDataLoader = None
 

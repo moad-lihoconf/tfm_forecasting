@@ -301,7 +301,7 @@ def _flip_contemporaneous(
         if incoming.size <= max_parents:
             continue
         keep = set(rng.choice(incoming, size=max_parents, replace=False).tolist())
-        for source in incoming:
+        for source in incoming.tolist():
             if source not in keep:
                 matrix[source, target] = False
 

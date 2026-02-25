@@ -17,7 +17,8 @@ from tfmplayground.utils import get_default_device
 
 def init_model_from_state_dict_file(file_path):
     """
-    reads model architecture from state dict, instantiates the architecture and loads the weights
+    Reads model architecture from state dict,
+    instantiates the architecture and loads the weights.
     """
     state_dict = torch.load(file_path, map_location=torch.device("cpu"))
     model = NanoTabPFNModel(
@@ -43,11 +44,12 @@ def to_numeric(x):
 
 def get_feature_preprocessor(X: np.ndarray | pd.DataFrame) -> ColumnTransformer:
     """
-    fits a preprocessor that imputes NaNs, encodes categorical features and removes constant features
+    Fits a preprocessor that imputes NaNs, encodes
+    categorical features and removes constant features.
     """
     X = pd.DataFrame(X)
-    num_mask = []
-    cat_mask = []
+    num_mask: list[bool] = []
+    cat_mask: list[bool] = []
     for col in X:
         unique_non_nan_entries = X[col].dropna().unique()
         if len(unique_non_nan_entries) <= 1:
@@ -62,8 +64,8 @@ def get_feature_preprocessor(X: np.ndarray | pd.DataFrame) -> ColumnTransformer:
         cat_mask.append(non_nan_entries != numeric_entries)
         # num_mask.append(is_numeric_dtype(X[col]))  # Assumes pandas dtype is correct
 
-    num_mask = np.array(num_mask)
-    cat_mask = np.array(cat_mask)
+    num_mask_arr = np.array(num_mask)
+    cat_mask_arr = np.array(cat_mask)
 
     num_transformer = Pipeline(
         [
@@ -95,8 +97,8 @@ def get_feature_preprocessor(X: np.ndarray | pd.DataFrame) -> ColumnTransformer:
 
     preprocessor = ColumnTransformer(
         transformers=[
-            ("num", num_transformer, num_mask),
-            ("cat", cat_transformer, cat_mask),
+            ("num", num_transformer, num_mask_arr),
+            ("cat", cat_transformer, cat_mask_arr),
         ]
     )
     return preprocessor
@@ -131,35 +133,43 @@ class NanoTabPFNClassifier:
         self.num_mem_chunks = num_mem_chunks
 
     def fit(self, X_train: np.ndarray, y_train: np.ndarray):
-        """stores X_train and y_train for later use, also computes the highest class number occuring in num_classes"""
+        """Stores X_train and y_train for later use, also computes num_classes."""
         self.feature_preprocessor = get_feature_preprocessor(X_train)
         self.X_train = self.feature_preprocessor.fit_transform(X_train)
         self.y_train = y_train
         self.num_classes = max(set(y_train)) + 1
 
     def predict(self, X_test: np.ndarray) -> np.ndarray:
-        """calls predit_proba and picks the class with the highest probability for each datapoint"""
+        """Calls predict_proba and picks the class with the highest probability."""
         predicted_probabilities = self.predict_proba(X_test)
         return predicted_probabilities.argmax(axis=1)
 
     def predict_proba(self, X_test: np.ndarray) -> np.ndarray:
         """
-        creates (x,y), runs it through our PyTorch Model, cuts off the classes that didn't appear in the training data
+        creates (x,y), runs it through our PyTorch Model,
+        cuts off the classes that didn't appear in the training data
         and applies softmax to get the probabilities
         """
-        x = np.concatenate((self.X_train, self.feature_preprocessor.transform(X_test)))
-        y = self.y_train
+        x_np = np.concatenate(
+            (self.X_train, self.feature_preprocessor.transform(X_test))
+        )
         with torch.no_grad():
             x = (
-                torch.from_numpy(x).unsqueeze(0).to(torch.float).to(self.device)
+                torch.from_numpy(x_np).unsqueeze(0).to(torch.float).to(self.device)
             )  # introduce batch size 1
-            y = torch.from_numpy(y).unsqueeze(0).to(torch.float).to(self.device)
+            y = (
+                torch.from_numpy(self.y_train)
+                .unsqueeze(0)
+                .to(torch.float)
+                .to(self.device)
+            )
             out = self.model(
                 (x, y),
                 single_eval_pos=len(self.X_train),
                 num_mem_chunks=self.num_mem_chunks,
             ).squeeze(0)  # remove batch size 1
-            # our pretrained classifier supports up to num_outputs classes, if the dataset has less we cut off the rest
+            # our pretrained classifier supports up to num_outputs classes,
+            # if the dataset has less we cut off the rest
             out = out[:, : self.num_classes]
             # apply softmax to get a probability distribution
             probabilities = F.softmax(out, dim=1)
@@ -244,6 +254,7 @@ class NanoTabPFNRegressor:
                 single_eval_pos=len(self.X_train),
                 num_mem_chunks=self.num_mem_chunks,
             ).squeeze(0)
+            assert isinstance(self.dist, FullSupportBarDistribution)
             preds_n = self.dist.mean(logits)
             preds = preds_n * self.y_train_std + self.y_train_mean
 

@@ -88,20 +88,32 @@ def get_openml_predictions(
     cache_directory: str | None = None,
 ):
     """
-    Evaluates a model on a set of OpenML tasks and returns predictions.
+    Evaluates a model on a set of OpenML tasks and returns
+    predictions.
 
-    Retrieves datasets from OpenML, applies preprocessing, and evaluates the given model on each task.
-    Returns true targets, predicted labels, and predicted probabilities for each dataset.
+    Retrieves datasets from OpenML, applies preprocessing,
+    and evaluates the given model on each task. Returns true
+    targets, predicted labels, and predicted probabilities
+    for each dataset.
 
     Args:
-        model (NanoTabPFNRegressor | NanoTabPFNClassifier): A scikit-learn compatible model or classifier to be evaluated.
-        tasks (list[int] | str, optional): A list of OpenML task IDs or the name of a benchmark suite.
-        max_n_features (int, optional): Maximum number of features allowed for a task. Tasks exceeding this limit are skipped.
-        max_n_samples (int, optional): Maximum number of instances allowed for a task. Tasks exceeding this limit are skipped.
-        classification (bool | None, optional): Whether the model is a classifier (True) or regressor (False). If None, it is inferred from the model type.
-        cache_directory (str | None, optional): Directory to save OpenML data. If None, default cache path is used.
+        model: A scikit-learn compatible model or classifier
+            to be evaluated.
+        tasks: A list of OpenML task IDs or the name of a
+            benchmark suite.
+        max_n_features: Maximum number of features allowed.
+            Tasks exceeding this limit are skipped.
+        max_n_samples: Maximum number of instances allowed.
+            Tasks exceeding this limit are skipped.
+        classification: Whether the model is a classifier
+            (True) or regressor (False). If None, it is
+            inferred from the model type.
+        cache_directory: Directory to save OpenML data.
+            If None, default cache path is used.
     Returns:
-        dict: A dictionary where keys are dataset names and values are tuples of (true targets, predicted labels, predicted probabilities).
+        dict: Keys are dataset names and values are tuples
+            of (true targets, predicted labels, predicted
+            probabilities).
     """
     if classification is None:
         classification = isinstance(model, NanoTabPFNClassifier)
@@ -117,6 +129,7 @@ def get_openml_predictions(
 
     dataset_predictions = {}
 
+    assert task_ids is not None
     for task_id in task_ids:
         task = openml.tasks.get_task(task_id, download_splits=False)
 
@@ -137,12 +150,13 @@ def get_openml_predictions(
         if tabarena_light:
             folds = 1  # code supports multiple folds but tabarena_light only has one
         repeat = 0  # code only supports one repeat
-        targets = []
-        predictions = []
-        probabilities = []
+        targets_list: list[np.ndarray] = []
+        predictions_list: list[np.ndarray] = []
+        probabilities_list: list[np.ndarray] = []
         for fold in range(folds):
             X, y, categorical_indicator, attribute_names = dataset.get_data(
-                target=task.target_name, dataset_format="dataframe"
+                target=task.target_name,
+                dataset_format="dataframe",
             )
             train_indices, test_indices = task.get_train_test_split_indices(
                 fold=fold, repeat=repeat
@@ -156,23 +170,30 @@ def get_openml_predictions(
                 label_encoder = LabelEncoder()
                 y_train = label_encoder.fit_transform(y_train)
                 y_test = label_encoder.transform(y_test)
-            targets.append(y_test)
+            targets_list.append(y_test)
 
             model.fit(X_train, y_train)
             y_pred = model.predict(X_test)
-            predictions.append(y_pred)
+            predictions_list.append(y_pred)
             if classification:
+                assert isinstance(model, NanoTabPFNClassifier)
                 y_proba = model.predict_proba(X_test)
                 if y_proba.shape[1] == 2:  # binary classification
                     y_proba = y_proba[:, 1]
-                probabilities.append(y_proba)
+                probabilities_list.append(y_proba)
 
-        y_pred = np.concatenate(predictions, axis=0)
-        targets = np.concatenate(targets, axis=0)
-        probabilities = (
-            np.concatenate(probabilities, axis=0) if len(probabilities) > 0 else None
+        y_pred_all = np.concatenate(predictions_list, axis=0)
+        targets_all = np.concatenate(targets_list, axis=0)
+        probabilities_all = (
+            np.concatenate(probabilities_list, axis=0)
+            if len(probabilities_list) > 0
+            else None
         )
-        dataset_predictions[str(dataset.name)] = (targets, y_pred, probabilities)
+        dataset_predictions[str(dataset.name)] = (
+            targets_all,
+            y_pred_all,
+            probabilities_all,
+        )
     return dataset_predictions
 
 
@@ -195,7 +216,8 @@ if __name__ == "__main__":
         "-dist_path",
         type=str,
         default=None,
-        help="Path to load the bucket edges for the support bar distribution from. Only needed for regression.",
+        help="Path to load bucket edges for the bar distribution."
+        " Only needed for regression.",
     )
     parser.add_argument(
         "-tasks",
@@ -214,33 +236,34 @@ if __name__ == "__main__":
         "-max_n_features",
         type=int,
         default=500,
-        help="Maximum number of features allowed for a task. Tasks exceeding this limit are skipped.",
+        help="Max features allowed per task. Tasks exceeding this are skipped.",
     )
     parser.add_argument(
         "-max_n_samples",
         type=int,
         default=10_000,
-        help="Maximum number of instances allowed for a task. Tasks exceeding this limit are skipped.",
+        help="Max instances allowed per task. Tasks exceeding this are skipped.",
     )
     parser.add_argument(
         "-num_mem_chunks",
         type=int,
         default=8,
-        help="Chunks attention computation into `num_mem_chunks` many chunks to reduce memory usage.",
+        help="Number of chunks for attention computation to reduce memory.",
     )
     args = parser.parse_args()
 
+    eval_model: NanoTabPFNClassifier | NanoTabPFNRegressor
     if args.model_type == "classification":
-        model = NanoTabPFNClassifier(
+        eval_model = NanoTabPFNClassifier(
             model=args.checkpoint, num_mem_chunks=args.num_mem_chunks
         )
     else:
-        model = NanoTabPFNRegressor(
+        eval_model = NanoTabPFNRegressor(
             model=args.checkpoint,
             dist=args.dist_path,
             num_mem_chunks=args.num_mem_chunks,
         )
-    model.model.eval()
+    eval_model.model.eval()
 
     if args.tasks == "toy_tasks" and args.model_type == "regression":
         tasks = TOY_TASKS_REGRESSION
@@ -250,7 +273,7 @@ if __name__ == "__main__":
         tasks = args.tasks
 
     predictions = get_openml_predictions(
-        model=model,
+        model=eval_model,
         tasks=tasks,
         max_n_features=args.max_n_features,
         max_n_samples=args.max_n_samples,
@@ -258,14 +281,15 @@ if __name__ == "__main__":
         cache_directory=args.cache_directory,
     )
 
-    average_score = 0
+    average_score: float = 0.0
     for dataset_name, (y_true, y_pred, y_proba) in predictions.items():
         if args.model_type == "classification":
             acc = balanced_accuracy_score(y_true, y_pred)
             auc = roc_auc_score(y_true, y_proba, multi_class="ovr")
             average_score += auc
             print(
-                f"Dataset: {dataset_name} | ROC AUC: {auc:.4f} | Balanced Accuracy: {acc:.4f}"
+                f"Dataset: {dataset_name} | ROC AUC: {auc:.4f} "
+                f"| Balanced Accuracy: {acc:.4f}"
             )
         else:
             r2 = r2_score(y_true, y_pred)
@@ -273,5 +297,7 @@ if __name__ == "__main__":
             print(f"Dataset: {dataset_name} | R2: {r2:.4f}")
     average_score /= len(predictions)
     print(
-        f"Average {'ROC AUC' if args.model_type == 'classification' else 'R2'}: {average_score:.4f}"
+        f"Average "
+        f"{'ROC AUC' if args.model_type == 'classification' else 'R2'}"
+        f": {average_score:.4f}"
     )

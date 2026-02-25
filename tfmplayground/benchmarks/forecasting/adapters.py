@@ -61,7 +61,7 @@ def build_forecast_table_from_series(
     split_index: int,
     seed: int,
 ) -> ForecastTable:
-    """Build one forecast table from a univariate raw series using DynSCM featurization."""
+    """Build one forecast table from a univariate raw series."""
     values = np.asarray(series_1d, dtype=np.float64)
     if values.ndim != 1:
         raise ValueError("series_1d must be a 1D array.")
@@ -172,7 +172,8 @@ class NanoTabPFNForecastAdapter:
             pred_arr = np.asarray(pred, dtype=np.float64)
             if pred_arr.shape != (x_test.shape[0],):
                 raise ValueError(
-                    f"Unexpected prediction shape {pred_arr.shape}, expected {(x_test.shape[0],)}"
+                    f"Unexpected prediction shape {pred_arr.shape}, "
+                    f"expected {(x_test.shape[0],)}"
                 )
             return pred_arr
         except _CRITICAL_EXCEPTIONS:
@@ -219,7 +220,8 @@ class TabICLForecastAdapter:
             pred_arr = np.asarray(pred, dtype=np.float64)
             if pred_arr.shape != (x_test.shape[0],):
                 raise ValueError(
-                    f"Unexpected prediction shape {pred_arr.shape}, expected {(x_test.shape[0],)}"
+                    f"Unexpected prediction shape {pred_arr.shape}, "
+                    f"expected {(x_test.shape[0],)}"
                 )
             return pred_arr
         except _CRITICAL_EXCEPTIONS:
@@ -460,7 +462,7 @@ class NICLRegressionAdapter:
             )
             selected_num_classes = choose_num_classes(
                 y_train_arr,
-                num_classes=requested,
+                num_classes=requested,  # type: ignore[arg-type]
                 min_samples_per_class=self.min_samples_per_class,
             )
             edges = fit_quantile_binner(

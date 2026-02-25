@@ -36,24 +36,33 @@ class NanoTabPFNModel(nn.Module):
         Provides two interfaces:
         model(X_train, y_train, X_test)
             Args:
-                X_train: (torch.Tensor) a tensor of shape (batch_size, num_train_datapoints, num_features)
-                y_train: (torch.Tensor) a tensor of shape (batch_size, num_train_datapoints, 1)
-                X_test: (torch.Tensor) a tensor of shape (batch_size, num_test_datapoints, num_features)
+                X_train: (torch.Tensor) shape
+                    (batch_size, num_train_datapoints, num_features)
+                y_train: (torch.Tensor) shape
+                    (batch_size, num_train_datapoints, 1)
+                X_test: (torch.Tensor) shape
+                    (batch_size, num_test_datapoints, num_features)
 
         model((x,y), single_eval_pos)
             Args:
-                x: (torch.Tensor) a tensor of shape (batch_size, num_datapoints, num_features)
-                y: (torch.Tensor) a tensor of shape (batch_size, num_train_datapoints, 1)
+                x: (torch.Tensor) shape
+                    (batch_size, num_datapoints, num_features)
+                y: (torch.Tensor) shape
+                    (batch_size, num_train_datapoints, 1)
 
 
         The former is similar to the sklearn interface.
-        In the latter x is the concatenation of X_train and X_test, y is y_train and single_eval_pos is the length of X_train.
-        Our model internally works with the latter representation, so we convert the former into the latter and forward it to
-        _forward.
+        In the latter x is the concatenation of X_train and
+        X_test, y is y_train and single_eval_pos is the
+        length of X_train.
+        Our model internally works with the latter
+        representation, so we convert the former into the
+        latter and forward it to _forward.
 
         Returns:
-            (torch.Tensor) a tensor of shape (batch_size, num_test_datapoints, num_classes),
-                           which represent the predicted logits
+            (torch.Tensor) shape
+                (batch_size, num_test_datapoints, num_classes),
+                which represent the predicted logits
         """
         if len(args) == 3:
             # case model(train_x, train_y, test_x)
@@ -61,7 +70,7 @@ class NanoTabPFNModel(nn.Module):
             if args[2] is not None:
                 x = torch.cat((x, args[2]), dim=1)
             return self._forward((x, args[1]), single_eval_pos=len(args[0]), **kwargs)
-        elif len(args) == 1 and isinstance(args, tuple):
+        else:
             # case model((x,y), single_eval_pos=None)
             return self._forward(*args, **kwargs)
 
@@ -85,10 +94,10 @@ class NanoTabPFNModel(nn.Module):
         y_src = self.target_encoder(y_src, num_rows)
         # concatenates the feature embeddings with the target embeddings
         # to give us the full table of embeddings (B,R,C,E))
-        src = torch.cat([x_src, y_src], 2)
+        enc = torch.cat([x_src, y_src], 2)
         # repeatedly applies the transformer block on (B,R,C,E)
         output = self.transformer_encoder(
-            src, single_eval_pos, num_mem_chunks=num_mem_chunks
+            enc, single_eval_pos, num_mem_chunks=num_mem_chunks
         )
         # selects the target embeddings (B,num_targets,1,E)
         output = output[:, single_eval_pos:, -1, :]
@@ -107,19 +116,25 @@ class FeatureEncoder(nn.Module):
 
     def forward(self, x: torch.Tensor, single_eval_pos: int) -> torch.Tensor:
         """
-        Normalizes all the features based on the mean and std of the features of the training data,
-        clips them between -100 and 100, then applies a linear layer to embed the features.
+        Normalizes all the features based on the mean and std
+        of the features of the training data, clips them
+        between -100 and 100, then applies a linear layer to
+        embed the features.
 
         Args:
-            x: (torch.Tensor) a tensor of shape (batch_size, num_rows, num_features)
-            single_eval_pos: (int) the number of datapoints in X_train
+            x: (torch.Tensor) shape
+                (batch_size, num_rows, num_features)
+            single_eval_pos: (int) the number of datapoints
+                in X_train
         Returns:
-            (torch.Tensor) a tensor of shape (batch_size, num_rows, num_features, embedding_size), representing
-                           the embeddings of the features
+            (torch.Tensor) shape
+                (batch_size, num_rows, num_features,
+                embedding_size), representing the embeddings
+                of the features
         """
         x = x.unsqueeze(-1)
-        mean = torch.mean(x[:, :single_eval_pos], dim=1, keepdims=True)
-        std = torch.std(x[:, :single_eval_pos], dim=1, keepdims=True) + 1e-8
+        mean = torch.mean(x[:, :single_eval_pos], dim=1, keepdim=True)
+        std = torch.std(x[:, :single_eval_pos], dim=1, keepdim=True) + 1e-8
         x = (x - mean) / std
         x = torch.clip(x, min=-100, max=100)
         return self.linear_layer(x)
@@ -133,17 +148,21 @@ class TargetEncoder(nn.Module):
 
     def forward(self, y_train: torch.Tensor, num_rows: int) -> torch.Tensor:
         """
-        Pads up y_train to the full length of y using the mean per dataset and then embeds it using a linear layer
+        Pads up y_train to the full length of y using the
+        mean per dataset and then embeds it using a linear
+        layer.
 
         Args:
-            y_train: (torch.Tensor) a tensor of shape (batch_size, num_train_datapoints, 1)
+            y_train: (torch.Tensor) shape
+                (batch_size, num_train_datapoints, 1)
             num_rows: (int) the full length of y
         Returns:
-            (torch.Tensor) a tensor of shape (batch_size, num_rows, 1, embedding_size), representing
-                           the embeddings of the targets
+            (torch.Tensor) shape
+                (batch_size, num_rows, 1, embedding_size),
+                representing the embeddings of the targets
         """
         # nan padding & nan handler instead?
-        mean = torch.mean(y_train, axis=1, keepdim=True)
+        mean = torch.mean(y_train, dim=1, keepdim=True)
         padding = mean.repeat(1, num_rows - y_train.shape[1], 1)
         y = torch.cat([y_train, padding], dim=1)
         y = y.unsqueeze(-1)
@@ -158,7 +177,7 @@ class TransformerEncoderStack(nn.Module):
         num_attention_heads: int,
         mlp_hidden_size: int,
     ):
-        """Instantiates num_layers many Transformer Blocks and stores them in a list so we can use them in the forward"""
+        """Instantiates num_layers many Transformer Blocks."""
         super().__init__()
         self.transformer_blocks = nn.ModuleList()
         for _ in range(num_layers):
@@ -172,17 +191,26 @@ class TransformerEncoderStack(nn.Module):
         self, x: torch.Tensor, single_eval_position: int, num_mem_chunks: int = 1
     ) -> torch.Tensor:
         """
-        Takes the embeddings of all the cells of the table as input and applies num_layers many Transformer blocks.
+        Takes the embeddings of all cells of the table as
+        input and applies num_layers many Transformer blocks.
 
         Args:
-            x: (torch.Tensor) a tensor of shape (batch_size, num_rows, num_features, embedding_size) that contains all the embeddings
-                              for all the cells in the table
-            single_eval_position: (int) the length of X_train
-            num_mem_chunks: (int) Number of chunks that memory-intense operations will be split into. Higher values use less memory but are slower.
-                                  Needs to be set to 1 during training to get correct gradients.
+            x: (torch.Tensor) shape
+                (batch_size, num_rows, num_features,
+                embedding_size) that contains all the
+                embeddings for all the cells in the table
+            single_eval_position: (int) the length of
+                X_train
+            num_mem_chunks: (int) Number of chunks that
+                memory-intense operations will be split into.
+                Higher values use less memory but are slower.
+                Needs to be set to 1 during training to get
+                correct gradients.
 
-        Returns
-            (torch.Tensor) a tensor of shape (batch_size, num_rows, num_features, embedding_size)
+        Returns:
+            (torch.Tensor) shape
+                (batch_size, num_rows, num_features,
+                embedding_size)
         """
         for block in self.transformer_blocks:
             x = block(
@@ -195,7 +223,8 @@ class TransformerEncoderStack(nn.Module):
 
 class TransformerEncoderLayer(nn.Module):
     """
-    Modified version of older version of https://github.com/pytorch/pytorch/blob/v2.6.0/torch/nn/modules/transformer.py#L630
+    Modified version of older version of
+    https://github.com/pytorch/pytorch/blob/v2.6.0/torch/nn/modules/transformer.py#L630
     """
 
     def __init__(
@@ -237,17 +266,27 @@ class TransformerEncoderLayer(nn.Module):
         self, src: torch.Tensor, single_eval_position: int, num_mem_chunks: int = 1
     ) -> torch.Tensor:
         """
-        Takes the embeddings of the table as input and applies self-attention between features and self-attention between datapoints
-        followed by a simple 2 layer MLP.
+        Takes the embeddings of the table as input and
+        applies self-attention between features and
+        self-attention between datapoints followed by a
+        simple 2 layer MLP.
 
         Args:
-            src: (torch.Tensor) a tensor of shape (batch_size, num_rows, num_features, embedding_size) that contains all the embeddings
-                                for all the cells in the table
-            single_eval_position: (int) the length of X_train
-            num_mem_chunks: (int) Number of chunks that memory-intense operations will be split into. Higher values use less memory but are slower.
-                                  Needs to be set to 1 during training to get correct gradients.
-        Returns
-            (torch.Tensor) a tensor of shape (batch_size, num_rows, num_features, embedding_size)
+            src: (torch.Tensor) shape
+                (batch_size, num_rows, num_features,
+                embedding_size) that contains all the
+                embeddings for all the cells in the table
+            single_eval_position: (int) the length of
+                X_train
+            num_mem_chunks: (int) Number of chunks that
+                memory-intense operations will be split into.
+                Higher values use less memory but are slower.
+                Needs to be set to 1 during training to get
+                correct gradients.
+        Returns:
+            (torch.Tensor) shape
+                (batch_size, num_rows, num_features,
+                embedding_size)
         """
         batch_size, rows_size, col_size, embedding_size = src.shape
         # attention between features
@@ -298,11 +337,16 @@ class TransformerEncoderLayer(nn.Module):
 
 def memory_chunking(num_mem_chunks: int) -> Callable[..., Callable]:
     """
-    This decorator will split the first dimension of the input into chunks and apply the wrapped function
-    to each chunk separately.
+    Splits the first dimension of the input into chunks
+    and applies the wrapped function to each chunk
+    separately.
+
     Args:
-        num_mem_chunks: (int) Number of chunks to split the input into, higher values use less memory but are slower.
-                          Needs to be set to 1 during training to disable chunking and get correct gradients.
+        num_mem_chunks: (int) Number of chunks to split
+            the input into, higher values use less memory
+            but are slower. Needs to be set to 1 during
+            training to disable chunking and get correct
+            gradients.
     """
 
     def decorator(
@@ -313,15 +357,19 @@ def memory_chunking(num_mem_chunks: int) -> Callable[..., Callable]:
                 return func(x)
             elif torch.is_grad_enabled():
                 warnings.warn(
-                    "Memory chunking is disabled since gradient computation is enabled to avoid incorrect gradients. "
-                    "Please use `with torch.no_grad():` during inference to enable chunking.", stacklevel=2
+                    "Memory chunking is disabled since "
+                    "gradient computation is enabled to "
+                    "avoid incorrect gradients. Please use "
+                    "`with torch.no_grad():` during "
+                    "inference to enable chunking.",
+                    stacklevel=2,
                 )
                 return func(x)
             chunk_size = max(1, math.ceil(x.shape[0] / num_mem_chunks))
             for x_split in torch.split(x, split_size_or_sections=chunk_size, dim=0):
-                x_split[:] = func(
-                    x_split
-                )  # in-place modification to save memory, will cause wrong gradients if used during training
+                # in-place modification to save memory,
+                # will cause wrong gradients during training
+                x_split[:] = func(x_split)
             return x
 
         return wrapper
@@ -341,8 +389,10 @@ class Decoder(nn.Module):
         Applies an MLP to the embeddings to get the logits
 
         Args:
-            x: (torch.Tensor) a tensor of shape (batch_size, num_rows, embedding_size)
+            x: (torch.Tensor) shape
+                (batch_size, num_rows, embedding_size)
         Returns:
-            (torch.Tensor) a tensor of shape (batch_size, num_rows, num_outputs)
+            (torch.Tensor) shape
+                (batch_size, num_rows, num_outputs)
         """
         return self.linear2(F.gelu(self.linear1(x)))

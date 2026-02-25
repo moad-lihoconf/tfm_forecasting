@@ -73,7 +73,7 @@ parser.add_argument(
     "--runname",
     type=str,
     default="nanotabpfn",
-    help="name of the training run, will be used to store the training checkpoints and for WandB logging",
+    help="name of the training run, used for checkpoints and WandB logging",
 )
 
 args = parser.parse_args()
@@ -119,14 +119,19 @@ class ToyEvaluationLoggerCallback(ConsoleLoggerCallback):
             scores.append(accuracy_score(y_true, y_pred))
         avg_score = sum(scores) / len(scores)
         print(
-            f"epoch {epoch:5d} | time {epoch_time:5.2f}s | mean loss {loss:5.2f} | avg accuracy {avg_score:.3f}",
+            f"epoch {epoch:5d} | time {epoch_time:5.2f}s "
+            f"| mean loss {loss:5.2f} | avg accuracy {avg_score:.3f}",
             flush=True,
         )
 
 
 class ProductionEvaluationLoggerCallback(WandbLoggerCallback):
     def __init__(
-        self, project: str, name: str = None, config: dict = None, log_dir: str = None
+        self,
+        project: str,
+        name: str | None = None,
+        config: dict | None = None,
+        log_dir: str | None = None,
     ):
         super().__init__(project, name, config, log_dir)
 
@@ -148,7 +153,8 @@ class ProductionEvaluationLoggerCallback(WandbLoggerCallback):
             }
         )
         print(
-            f"epoch {epoch:5d} | time {epoch_time:5.2f}s | mean loss {loss:5.2f} | avg roc auc {avg_score:.3f}",
+            f"epoch {epoch:5d} | time {epoch_time:5.2f}s "
+            f"| mean loss {loss:5.2f} | avg roc auc {avg_score:.3f}",
             flush=True,
         )
 

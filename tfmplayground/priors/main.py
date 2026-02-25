@@ -16,7 +16,7 @@ from .dynscm import DynSCMConfig
 from .utils import build_tabpfn_prior, build_ticl_prior, dump_prior_to_h5
 
 try:
-    from .dataloader import TabPFNPriorDataLoader
+    from .dataloader import TabPFNPriorDataLoader  # type: ignore[attr-defined]
 except ImportError:  # pragma: no cover - legacy optional integration.
     TabPFNPriorDataLoader = None
 
