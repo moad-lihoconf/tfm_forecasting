@@ -7,6 +7,7 @@ import torch
 from pfns.bar_distribution import FullSupportBarDistribution
 from torch import nn
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from tfmplayground.callbacks import Callback
 from tfmplayground.model import NanoTabPFNModel
@@ -81,7 +82,10 @@ def train(
             wrapped_model.train()  # Turn on the train mode
             optimizer.train()
             total_loss = 0.0
-            for i, full_data in enumerate(prior):
+            pbar = tqdm(
+                enumerate(prior), total=len(prior), desc=f"Epoch {epoch}", leave=False
+            )
+            for i, full_data in pbar:
                 single_eval_pos = full_data["single_eval_pos"]
                 data = (
                     full_data["x"].to(device),
@@ -109,6 +113,7 @@ def train(
                 loss = losses.mean() / accumulate_gradients
                 loss.backward()
                 total_loss += loss.cpu().detach().item() * accumulate_gradients
+                pbar.set_postfix({"loss": f"{total_loss / (i + 1):.4f}"})
 
                 if (i + 1) % accumulate_gradients == 0:
                     torch.nn.utils.clip_grad_norm_(wrapped_model.parameters(), 1.0)
