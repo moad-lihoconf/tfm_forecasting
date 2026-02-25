@@ -1,5 +1,6 @@
 import argparse
 
+import h5py
 import torch
 from pfns.bar_distribution import FullSupportBarDistribution
 from sklearn.metrics import r2_score
@@ -80,6 +81,61 @@ parser.add_argument(
 parser.add_argument(
     "--n_buckets", type=int, default=100, help="number of buckets for the data loader"
 )
+parser.add_argument(
+    "--val_split",
+    type=float,
+    default=0.1,
+    help="fraction of prior functions used for validation (0,1)",
+)
+parser.add_argument(
+    "--early_stopping_metric",
+    type=str,
+    default="val_loss",
+    choices=["val_loss", "val_rmse"],
+    help="validation metric used for early stopping and best checkpoint selection",
+)
+parser.add_argument(
+    "--early_stopping_patience",
+    type=int,
+    default=10,
+    help="number of validation evaluations without improvement before stopping",
+)
+parser.add_argument(
+    "--early_stopping_min_delta",
+    type=float,
+    default=1e-4,
+    help="minimum improvement required to reset patience",
+)
+parser.add_argument(
+    "--eval_every_epochs",
+    type=int,
+    default=1,
+    help="run validation every N epochs",
+)
+parser.add_argument(
+    "--save_best_weights",
+    type=str,
+    default=None,
+    help="path for best model weights (defaults to <saveweights>.best.pth)",
+)
+parser.add_argument(
+    "--max_train_hours",
+    type=float,
+    default=None,
+    help="optional wall-clock limit in hours",
+)
+parser.add_argument(
+    "--weight_decay",
+    type=float,
+    default=1e-2,
+    help="weight decay value for optimizer",
+)
+parser.add_argument(
+    "--dropout",
+    type=float,
+    default=0.1,
+    help="dropout rate for transformer and decoder blocks",
+)
 
 args = parser.parse_args()
 
@@ -90,12 +146,56 @@ ckpt = None
 if args.loadcheckpoint:
     ckpt = torch.load(args.loadcheckpoint)
 
+if not 0.0 < args.val_split < 1.0:
+    raise ValueError("--val_split must be in (0, 1).")
+if args.eval_every_epochs < 1:
+    raise ValueError("--eval_every_epochs must be >= 1.")
+if args.early_stopping_patience < 1:
+    raise ValueError("--early_stopping_patience must be >= 1.")
+if args.dropout < 0.0 or args.dropout >= 1.0:
+    raise ValueError("--dropout must be in [0, 1).")
+
+with h5py.File(args.priordump, "r") as f:
+    total_functions = int(f["X"].shape[0])
+if total_functions < 2:
+    raise ValueError(
+        "Prior dump must contain at least 2 functions for train/val split."
+    )
+
+val_count = int(total_functions * args.val_split)
+if val_count < 1 or val_count >= total_functions:
+    raise ValueError(
+        "Computed validation split is empty or full. "
+        f"total={total_functions}, val_split={args.val_split}"
+    )
+perm = torch.randperm(total_functions, device="cpu")
+val_indices = perm[:val_count].tolist()
+train_indices = perm[val_count:].tolist()
+
+if len(train_indices) < args.batchsize or len(val_indices) < args.batchsize:
+    raise ValueError(
+        "Train/validation partitions must each contain at least one"
+        " full batch. "
+        f"train={len(train_indices)}, val={len(val_indices)}, "
+        f"batchsize={args.batchsize}"
+    )
+
+train_start = args.steps * (ckpt["epoch"] if ckpt else 0)
 prior = PriorDumpDataLoader(
     filename=args.priordump,
     num_steps=args.steps,
     batch_size=args.batchsize,
     device=device,
-    starting_index=args.steps * (ckpt["epoch"] if ckpt else 0),
+    starting_index=train_start,
+    indices=train_indices,
+)
+val_prior = PriorDumpDataLoader(
+    filename=args.priordump,
+    num_steps=max(1, args.steps // 4),
+    batch_size=args.batchsize,
+    device=device,
+    starting_index=0,
+    indices=val_indices,
 )
 
 model = NanoTabPFNModel(
@@ -104,6 +204,11 @@ model = NanoTabPFNModel(
     mlp_hidden_size=args.hiddensize,
     num_layers=args.layers,
     num_outputs=args.n_buckets,
+    dropout=(
+        float(ckpt["architecture"].get("dropout", args.dropout))
+        if ckpt
+        else args.dropout
+    ),
 )
 
 bucket_edges = make_global_bucket_edges(
@@ -135,16 +240,19 @@ class EvaluationLoggerCallback(ConsoleLoggerCallback):
             scores.append(r2_score(y_true, y_pred))
         avg_score = sum(scores) / len(scores)
         print(
-            f"epoch {epoch:5d} | time {epoch_time:5.2f}s | mean loss {loss:5.2f} | avg r2 score {avg_score:.3f}",
+            f"epoch {epoch:5d} | time {epoch_time:5.2f}s"
+            f" | mean loss {loss:5.2f}"
+            f" | avg r2 score {avg_score:.3f}",
             flush=True,
         )
 
 
 callbacks = [EvaluationLoggerCallback(TOY_TASKS_REGRESSION)]
 
-trained_model, loss = train(
+trained_model, train_info = train(
     model=model,
     prior=prior,
+    val_prior=val_prior,
     criterion=dist,
     epochs=args.epochs,
     accumulate_gradients=args.accumulate,
@@ -152,6 +260,16 @@ trained_model, loss = train(
     device=device,
     callbacks=callbacks,
     ckpt=ckpt,
+    eval_every_epochs=args.eval_every_epochs,
+    max_train_seconds=(
+        None if args.max_train_hours is None else int(args.max_train_hours * 3600)
+    ),
+    early_stopping={
+        "metric": args.early_stopping_metric,
+        "patience": args.early_stopping_patience,
+        "min_delta": args.early_stopping_min_delta,
+    },
+    weight_decay=args.weight_decay,
 )
 
 trained_model = trained_model.to("cpu")
@@ -162,7 +280,35 @@ checkpoint_payload = {
         "num_attention_heads": int(trained_model.num_attention_heads),
         "mlp_hidden_size": int(trained_model.mlp_hidden_size),
         "num_outputs": int(trained_model.num_outputs),
+        "dropout": float(getattr(trained_model, "dropout", args.dropout)),
     },
     "model": trained_model.state_dict(),
+    "training": train_info,
+    "split": {
+        "total_functions": total_functions,
+        "train_count": len(train_indices),
+        "val_count": len(val_indices),
+        "val_split": args.val_split,
+    },
 }
 torch.save(checkpoint_payload, args.saveweights)
+
+best_ckpt_path = "workdir/nanoTFM/best_checkpoint.pth"
+save_best_weights_path = args.save_best_weights or f"{args.saveweights}.best.pth"
+best_payload = checkpoint_payload
+try:
+    best_state = torch.load(best_ckpt_path, map_location=torch.device("cpu"))
+    best_payload = {
+        "architecture": best_state["architecture"],
+        "model": best_state["model"],
+        "training": {
+            "best_epoch": best_state.get("best_epoch", train_info.get("best_epoch", 0)),
+            "best_metric": best_state.get(
+                "best_metric", train_info.get("best_metric", float("inf"))
+            ),
+            "stop_reason": train_info.get("stop_reason", "completed"),
+        },
+    }
+except FileNotFoundError:
+    pass
+torch.save(best_payload, save_best_weights_path)

@@ -16,6 +16,7 @@ class NanoTabPFNModel(nn.Module):
         mlp_hidden_size: int,
         num_layers: int,
         num_outputs: int,
+        dropout: float = 0.0,
     ):
         """Initializes the feature/target encoder, transformer stack and decoder"""
         super().__init__()
@@ -24,12 +25,19 @@ class NanoTabPFNModel(nn.Module):
         self.mlp_hidden_size = mlp_hidden_size
         self.num_layers = num_layers
         self.num_outputs = num_outputs
+        self.dropout = dropout
         self.feature_encoder = FeatureEncoder(embedding_size)
         self.target_encoder = TargetEncoder(embedding_size)
         self.transformer_encoder = TransformerEncoderStack(
-            num_layers, embedding_size, num_attention_heads, mlp_hidden_size
+            num_layers,
+            embedding_size,
+            num_attention_heads,
+            mlp_hidden_size,
+            dropout=dropout,
         )
-        self.decoder = Decoder(embedding_size, mlp_hidden_size, num_outputs)
+        self.decoder = Decoder(
+            embedding_size, mlp_hidden_size, num_outputs, dropout=dropout
+        )
 
     def forward(self, *args, **kwargs) -> torch.Tensor:
         """
@@ -176,6 +184,7 @@ class TransformerEncoderStack(nn.Module):
         embedding_size: int,
         num_attention_heads: int,
         mlp_hidden_size: int,
+        dropout: float = 0.0,
     ):
         """Instantiates num_layers many Transformer Blocks."""
         super().__init__()
@@ -183,7 +192,10 @@ class TransformerEncoderStack(nn.Module):
         for _ in range(num_layers):
             self.transformer_blocks.append(
                 TransformerEncoderLayer(
-                    embedding_size, num_attention_heads, mlp_hidden_size
+                    embedding_size,
+                    num_attention_heads,
+                    mlp_hidden_size,
+                    dropout=dropout,
                 )
             )
 
@@ -232,12 +244,14 @@ class TransformerEncoderLayer(nn.Module):
         embedding_size: int,
         nhead: int,
         mlp_hidden_size: int,
+        dropout: float = 0.0,
         layer_norm_eps: float = 1e-5,
         batch_first: bool = True,
         device=None,
         dtype=None,
     ):
         super().__init__()
+        self.dropout = nn.Dropout(dropout)
         self.self_attention_between_datapoints = MultiheadAttention(
             embedding_size, nhead, batch_first=batch_first, device=device, dtype=dtype
         )
@@ -294,7 +308,7 @@ class TransformerEncoderLayer(nn.Module):
 
         @memory_chunking(num_mem_chunks)
         def feature_attention(x):
-            return self.self_attention_between_features(x, x, x)[0] + x
+            return self.dropout(self.self_attention_between_features(x, x, x)[0]) + x
 
         src = feature_attention(src)
         src = src.reshape(batch_size, rows_size, col_size, embedding_size)
@@ -316,7 +330,7 @@ class TransformerEncoderLayer(nn.Module):
                 x[:, :single_eval_position],
                 x[:, :single_eval_position],
             )[0]
-            return torch.cat([x_left, x_right], dim=1) + x
+            return self.dropout(torch.cat([x_left, x_right], dim=1)) + x
 
         src = datapoint_attention(src)
         src = src.reshape(batch_size, col_size, rows_size, embedding_size)
@@ -327,7 +341,7 @@ class TransformerEncoderLayer(nn.Module):
 
         @memory_chunking(num_mem_chunks)
         def mlp(x):
-            return self.linear2(F.gelu(self.linear1(x))) + x
+            return self.dropout(self.linear2(F.gelu(self.linear1(x)))) + x
 
         src = mlp(src)
         src = src.reshape(batch_size, rows_size, col_size, embedding_size)
@@ -378,11 +392,18 @@ def memory_chunking(num_mem_chunks: int) -> Callable[..., Callable]:
 
 
 class Decoder(nn.Module):
-    def __init__(self, embedding_size: int, mlp_hidden_size: int, num_outputs: int):
+    def __init__(
+        self,
+        embedding_size: int,
+        mlp_hidden_size: int,
+        num_outputs: int,
+        dropout: float = 0.0,
+    ):
         """Initializes the linear layers for use in the forward"""
         super().__init__()
         self.linear1 = nn.Linear(embedding_size, mlp_hidden_size)
         self.linear2 = nn.Linear(mlp_hidden_size, num_outputs)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -395,4 +416,4 @@ class Decoder(nn.Module):
             (torch.Tensor) shape
                 (batch_size, num_rows, num_outputs)
         """
-        return self.linear2(F.gelu(self.linear1(x)))
+        return self.linear2(self.dropout(F.gelu(self.linear1(x))))

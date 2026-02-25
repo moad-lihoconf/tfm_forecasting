@@ -27,6 +27,7 @@ def init_model_from_state_dict_file(file_path):
         mlp_hidden_size=state_dict["architecture"]["mlp_hidden_size"],
         num_layers=state_dict["architecture"]["num_layers"],
         num_outputs=state_dict["architecture"]["num_outputs"],
+        dropout=float(state_dict["architecture"].get("dropout", 0.0)),
     )
     model.load_state_dict(state_dict["model"])
     return model

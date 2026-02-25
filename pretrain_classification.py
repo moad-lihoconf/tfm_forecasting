@@ -162,7 +162,7 @@ class ProductionEvaluationLoggerCallback(WandbLoggerCallback):
 # callbacks = [ProductionEvaluationLoggerCallback('nanoTFM', args.runname)]
 callbacks = [ToyEvaluationLoggerCallback(TOY_TASKS_CLASSIFICATION)]
 
-trained_model, loss = train(
+trained_model, _train_info = train(
     model=model,
     prior=prior,
     criterion=criterion,

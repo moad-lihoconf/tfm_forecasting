@@ -81,12 +81,21 @@ class PriorDumpDataLoader(DataLoader):
         device (torch.device): Device to load tensors onto.
     """
 
-    def __init__(self, filename, num_steps, batch_size, device, starting_index=0):
+    def __init__(
+        self,
+        filename,
+        num_steps,
+        batch_size,
+        device,
+        starting_index=0,
+        indices: list[int] | None = None,
+    ):
         self.filename = filename
         self.num_steps = num_steps
         self.batch_size = batch_size
         with h5py.File(self.filename, "r") as f:
-            self.num_datapoints_max = f["X"].shape[0]
+            self.total_num_functions = int(f["X"].shape[0])
+            self.num_datapoints_max = self.total_num_functions
             if "max_num_classes" in f:
                 self.max_num_classes = f["max_num_classes"][0]
             else:
@@ -95,34 +104,49 @@ class PriorDumpDataLoader(DataLoader):
             self.has_num_datapoints = "num_datapoints" in f
             self.stored_max_seq_len = f["X"].shape[1]
         self.device = device
-        self.pointer = starting_index
+        self.indices = (
+            torch.arange(self.total_num_functions, dtype=torch.long)
+            if indices is None
+            else torch.as_tensor(indices, dtype=torch.long)
+        )
+        if self.indices.ndim != 1 or self.indices.numel() == 0:
+            raise ValueError("indices must be a non-empty 1D list of row indices.")
+        if (
+            int(self.indices.min()) < 0
+            or int(self.indices.max()) >= self.total_num_functions
+        ):
+            raise ValueError("indices contain out-of-range row ids for this dump.")
+        self.num_functions = int(self.indices.numel())
+        self.pointer = starting_index % self.num_functions
+
+    def _next_batch_indices(self) -> torch.Tensor:
+        positions = (torch.arange(self.batch_size) + self.pointer) % self.num_functions
+        batch_indices = self.indices[positions]
+        self.pointer = (self.pointer + self.batch_size) % self.num_functions
+        return batch_indices
 
     def __iter__(self):
         with h5py.File(self.filename, "r") as f:
             for _ in range(self.num_steps):
-                end = self.pointer + self.batch_size
+                batch_idx = self._next_batch_indices().cpu().numpy()
+                sort_order = batch_idx.argsort()
+                sorted_idx = batch_idx[sort_order]
+                inverse_order = sort_order.argsort()
 
-                num_features = f["num_features"][self.pointer : end].max()
+                num_features = f["num_features"][sorted_idx].max()
                 if self.has_num_datapoints:
-                    num_datapoints_batch = f["num_datapoints"][self.pointer : end]
+                    num_datapoints_batch = f["num_datapoints"][sorted_idx]
                     max_seq_in_batch = int(num_datapoints_batch.max())
                 else:
                     max_seq_in_batch = int(self.stored_max_seq_len)
 
-                x = torch.from_numpy(
-                    f["X"][self.pointer : end, :max_seq_in_batch, :num_features]
-                )
-                y = torch.from_numpy(f["y"][self.pointer : end, :max_seq_in_batch])
-                single_eval_pos = f["single_eval_pos"][self.pointer : end]
-
-                self.pointer += self.batch_size
-                if self.pointer >= f["X"].shape[0]:
-                    print(
-                        """Finished iteration over all stored datasets! """
-                        """Will start reusing the same data with different """
-                        """splits now."""
-                    )
-                    self.pointer = 0
+                x_np = f["X"][sorted_idx, :max_seq_in_batch, :num_features][
+                    inverse_order
+                ]
+                y_np = f["y"][sorted_idx, :max_seq_in_batch][inverse_order]
+                single_eval_pos = f["single_eval_pos"][sorted_idx][inverse_order]
+                x = torch.from_numpy(x_np)
+                y = torch.from_numpy(y_np)
 
                 yield dict(
                     x=x.to(self.device),
