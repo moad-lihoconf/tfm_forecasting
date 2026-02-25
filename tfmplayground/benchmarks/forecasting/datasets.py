@@ -144,7 +144,7 @@ def load_suite(cfg: ForecastBenchmarkConfig) -> dict[str, DatasetBundle]:
 
 def _load_one_dataset(spec: DatasetSpec, cfg: ForecastBenchmarkConfig) -> DatasetBundle:
     cache_path = Path(cfg.datasets.cache_dir) / spec.cache_file
-    max_series = int(cfg.datasets.max_series_per_dataset)
+    max_series = cfg.datasets.max_series_per_dataset
 
     try:
         if cache_path.exists():
@@ -157,7 +157,7 @@ def _load_one_dataset(spec: DatasetSpec, cfg: ForecastBenchmarkConfig) -> Datase
                 name=spec.name,
                 series=np.zeros((0, 0), dtype=np.float64),
                 frequency=spec.frequency,
-                seasonality=int(spec.seasonality),
+                seasonality=spec.seasonality,
                 skipped=True,
                 skip_reason=note,
             )
@@ -166,7 +166,7 @@ def _load_one_dataset(spec: DatasetSpec, cfg: ForecastBenchmarkConfig) -> Datase
             name=spec.name,
             series=np.zeros((0, 0), dtype=np.float64),
             frequency=spec.frequency,
-            seasonality=int(spec.seasonality),
+            seasonality=spec.seasonality,
             skipped=True,
             skip_reason=f"Failed to load dataset {spec.name}: {exc}",
         )
@@ -178,7 +178,7 @@ def _load_one_dataset(spec: DatasetSpec, cfg: ForecastBenchmarkConfig) -> Datase
         name=spec.name,
         series=series,
         frequency=spec.frequency,
-        seasonality=int(spec.seasonality),
+        seasonality=spec.seasonality,
         skipped=False,
         skip_reason=None,
     )

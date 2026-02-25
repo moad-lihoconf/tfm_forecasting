@@ -6,13 +6,11 @@ import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 import requests
-
-if TYPE_CHECKING:
-    import torch
+import torch
 
 from tfmplayground.interface import NanoTabPFNClassifier, NanoTabPFNRegressor
 from tfmplayground.priors.dynscm.config import DynSCMConfig
@@ -65,7 +63,7 @@ def build_forecast_table_from_series(
     values = np.asarray(series_1d, dtype=np.float64)
     if values.ndim != 1:
         raise ValueError("series_1d must be a 1D array.")
-    if values.size <= int(np.max(h_idx)):
+    if values.size <= np.max(h_idx):
         raise ValueError("series_1d is too short for requested horizons.")
 
     observed = np.isfinite(values)
@@ -108,7 +106,7 @@ def build_forecast_table_from_series(
         y=y.astype(np.float64, copy=False),
         t_idx=np.asarray(meta["t_idx"][0], dtype=np.int64),
         h_idx=np.asarray(meta["h_idx"][0], dtype=np.int64),
-        split_index=int(split_index),
+        split_index=split_index,
     )
 
 
@@ -118,21 +116,19 @@ def _make_featurization_cfg(
     payload = {
         "num_variables_min": 2,
         "num_variables_max": 2,
-        "series_length_min": int(series_length),
-        "series_length_max": int(series_length),
-        "max_lag": max(
-            int(cfg.protocol.max_feature_lag), int(max(cfg.protocol.explicit_lags))
-        ),
-        "forecast_horizons": tuple(int(h) for h in cfg.protocol.horizons),
-        "train_rows_min": int(cfg.protocol.context_rows),
-        "train_rows_max": int(cfg.protocol.context_rows),
-        "test_rows_min": int(cfg.protocol.test_rows),
-        "test_rows_max": int(cfg.protocol.test_rows),
-        "max_feature_lag": int(cfg.protocol.max_feature_lag),
-        "explicit_lags": tuple(int(v) for v in cfg.protocol.explicit_lags),
-        "num_kernels": int(cfg.protocol.num_kernels),
-        "add_mask_channels": bool(cfg.protocol.add_mask_channels),
-        "random_seed": int(cfg.seed),
+        "series_length_min": series_length,
+        "series_length_max": series_length,
+        "max_lag": max(cfg.protocol.max_feature_lag, max(cfg.protocol.explicit_lags)),
+        "forecast_horizons": cfg.protocol.horizons,
+        "train_rows_min": cfg.protocol.context_rows,
+        "train_rows_max": cfg.protocol.context_rows,
+        "test_rows_min": cfg.protocol.test_rows,
+        "test_rows_max": cfg.protocol.test_rows,
+        "max_feature_lag": cfg.protocol.max_feature_lag,
+        "explicit_lags": cfg.protocol.explicit_lags,
+        "num_kernels": cfg.protocol.num_kernels,
+        "add_mask_channels": cfg.protocol.add_mask_channels,
+        "random_seed": cfg.seed,
     }
     return DynSCMConfig.from_dict(payload)
 
@@ -154,7 +150,7 @@ class NanoTabPFNForecastAdapter:
         self.model_path = model_path
         self.dist_path = dist_path
         self.device = device
-        self.num_mem_chunks = int(num_mem_chunks)
+        self.num_mem_chunks = num_mem_chunks
         self._model_factory = model_factory or NanoTabPFNRegressor
 
     def fit_predict(
@@ -245,7 +241,7 @@ class NanoTabPFNClassifierAdapter:
         self.name = name
         self.model_path = model_path
         self.device = device
-        self.num_mem_chunks = int(num_mem_chunks)
+        self.num_mem_chunks = num_mem_chunks
         self._model_factory = model_factory or NanoTabPFNClassifier
 
     def fit_predict_proba(
@@ -330,8 +326,8 @@ class NICLClientAdapter:
     ):
         self.name = "nicl_api"
         self.api_url = api_url
-        self.timeout_seconds = float(timeout_seconds)
-        self.max_retries = int(max_retries)
+        self.timeout_seconds = timeout_seconds
+        self.max_retries = max_retries
         self.token_env = token_env
         self.session = session or requests.Session()
 
@@ -350,7 +346,7 @@ class NICLClientAdapter:
             "x_train": np.asarray(x_train, dtype=np.float64).tolist(),
             "y_train": np.asarray(y_train, dtype=np.int64).tolist(),
             "x_test": np.asarray(x_test, dtype=np.float64).tolist(),
-            "num_classes": int(num_classes),
+            "num_classes": num_classes,
         }
         headers = {
             "Authorization": f"Bearer {token}",
@@ -403,15 +399,15 @@ class NICLRegressionAdapter:
             raise ValueError(f"Unsupported NICL regression mode: {mode!r}")
         self.name = "nicl_regression"
         self.api_url = api_url
-        self.timeout_seconds = float(timeout_seconds)
-        self.max_retries = int(max_retries)
+        self.timeout_seconds = timeout_seconds
+        self.max_retries = max_retries
         self.mode = mode
         self.token_env = token_env
         self.model_name = model_name
         if isinstance(proxy_num_classes, str) and proxy_num_classes != "auto":
             raise ValueError("proxy_num_classes must be an int or the string 'auto'.")
         self.proxy_num_classes = proxy_num_classes
-        self.min_samples_per_class = int(min_samples_per_class)
+        self.min_samples_per_class = min_samples_per_class
         self.session = session or requests.Session()
 
     def fit_predict(
@@ -458,7 +454,7 @@ class NICLRegressionAdapter:
             requested = (
                 self.proxy_num_classes
                 if self.proxy_num_classes == "auto"
-                else int(self.proxy_num_classes)
+                else self.proxy_num_classes
             )
             selected_num_classes = choose_num_classes(
                 y_train_arr,
@@ -476,7 +472,7 @@ class NICLRegressionAdapter:
                 f"NICL quantized proxy binning failed: {exc}"
             ) from exc
 
-        num_classes = int(edges.size - 1)
+        num_classes = edges.size - 1
         payload = {
             "task": "classification",
             "model": self.model_name,
@@ -689,6 +685,12 @@ def default_regression_adapters(
             adapters["nicl_regression"] = UnavailableRegressionAdapter(
                 "nicl_regression",
                 "nicl_regression_endpoint is not configured.",
+            )
+        elif cfg.models.nicl_regression_mode == "native":
+            adapters["nicl_regression"] = UnavailableRegressionAdapter(
+                "nicl_regression",
+                "NICL API currently supports only classification;"
+                " use quantized_proxy mode.",
             )
         else:
             adapters["nicl_regression"] = NICLRegressionAdapter(

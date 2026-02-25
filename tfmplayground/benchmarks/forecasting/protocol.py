@@ -24,7 +24,7 @@ class RollingOriginIndices:
 
     @property
     def split_index(self) -> int:
-        return int(self.n_train)
+        return self.n_train
 
 
 def generate_rolling_origin_indices(
@@ -51,12 +51,14 @@ def generate_rolling_origin_indices(
         raise ValueError("horizons must contain positive integers.")
 
     max_horizon = int(np.max(horizon_arr))
-    min_origin = int(required_lag)
-    max_origin = int(series_length - 1 - max_horizon)
+    min_origin = required_lag
+    max_origin = series_length - 1 - max_horizon
     if max_origin <= min_origin + 1:
         raise ValueError(
-            "Insufficient timeline budget for strict chronology and requested horizons: "
-            f"need max_origin > min_origin + 1, got {max_origin=} and {min_origin=}."
+            "Insufficient timeline budget for strict chronology"
+            " and requested horizons: "
+            f"need max_origin > min_origin + 1, "
+            f"got {max_origin=} and {min_origin=}."
         )
 
     rng = np.random.default_rng(seed)

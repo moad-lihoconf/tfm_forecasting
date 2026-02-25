@@ -198,7 +198,7 @@ def _sample_residual_parameters(
     ).astype(np.float64)
 
     lipschitz_bounds = _residual_lipschitz_upper_bounds(input_weights, output_weights)
-    cap = float(cfg.residual_lipschitz_max)
+    cap = cfg.residual_lipschitz_max
     if cap <= 0.0:
         output_weights.fill(0.0)
     else:
@@ -286,6 +286,6 @@ def _validate_mechanism_sample(
     if mechanism_sample.mechanism_type == "linear_var" and m != 0:
         raise RuntimeError("linear_var mode must not include residual features.")
     if mechanism_sample.mechanism_type == "linear_plus_residual":
-        cap = float(cfg.residual_lipschitz_max)
+        cap = cfg.residual_lipschitz_max
         if np.any(mechanism_sample.residual_lipschitz_upper_bounds > cap + tol):
             raise RuntimeError("Residual Lipschitz bounds exceed configured cap.")

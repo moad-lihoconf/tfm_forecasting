@@ -40,7 +40,7 @@ def sample_origins_and_horizons(
 
     h_idx = generator.choice(horizons, size=(batch_size, num_rows), replace=True)
 
-    required_lag = max(int(cfg.max_feature_lag), int(np.max(cfg.explicit_lags)))
+    required_lag = max(cfg.max_feature_lag, int(np.max(cfg.explicit_lags)))
     max_horizon = int(np.max(horizons))
     min_origin = required_lag
     max_origin = num_steps - 1 - max_horizon
@@ -119,7 +119,7 @@ def build_forecasting_table(
         t_idx = np.asarray(t_idx, dtype=np.int64)
         h_idx = np.asarray(h_idx, dtype=np.int64)
 
-    required_lag = max(int(cfg.max_feature_lag), int(np.max(cfg.explicit_lags)))
+    required_lag = max(cfg.max_feature_lag, int(np.max(cfg.explicit_lags)))
     _validate_time_layout(
         t_idx=t_idx,
         h_idx=h_idx,
@@ -294,8 +294,8 @@ def _sample_kernels(
     cfg: DynSCMConfig,
     rng: np.random.Generator,
 ) -> np.ndarray:
-    num_kernels = int(cfg.num_kernels)
-    max_lag = int(cfg.max_feature_lag)
+    num_kernels = cfg.num_kernels
+    max_lag = cfg.max_feature_lag
     if num_kernels <= 0:
         return np.zeros((0, max_lag), dtype=np.float64)
 

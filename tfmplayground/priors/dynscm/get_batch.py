@@ -120,9 +120,7 @@ def make_get_batch_dynscm(
                 "DynSCM batch feature tensor contains non-finite values."
             )
         if not np.isfinite(y_batch).all():
-            raise RuntimeError(
-                "DynSCM batch label tensor contains non-finite values."
-            )
+            raise RuntimeError("DynSCM batch label tensor contains non-finite values.")
 
         x_tensor = torch.from_numpy(x_batch).to(target_device)
         y_tensor = torch.from_numpy(y_batch).to(target_device)
@@ -143,10 +141,10 @@ def _sample_shared_row_counts(
     num_datapoints_max: int,
     rng: np.random.Generator,
 ) -> tuple[int, int]:
-    train_min = max(1, int(cfg.train_rows_min))
-    train_max = max(train_min, int(cfg.train_rows_max))
-    test_min = max(1, int(cfg.test_rows_min))
-    test_max = max(test_min, int(cfg.test_rows_max))
+    train_min = max(1, cfg.train_rows_min)
+    train_max = max(train_min, cfg.train_rows_max)
+    test_min = max(1, cfg.test_rows_min)
+    test_max = max(test_min, cfg.test_rows_max)
 
     # O(train_range × test_range) enumeration; ~500 pairs with default config
     # bounds.  Acceptable for prior sampling; consider caching if profiling
@@ -168,7 +166,7 @@ def _sample_shared_row_counts(
 
 
 def _required_min_series_length(cfg: DynSCMConfig) -> int:
-    required_lag = max(int(cfg.max_feature_lag), int(max(cfg.explicit_lags)))
+    required_lag = max(cfg.max_feature_lag, max(cfg.explicit_lags))
     max_horizon = int(max(cfg.forecast_horizons))
     return required_lag + max_horizon + 2
 
@@ -179,13 +177,13 @@ def _sample_dataset_dimensions(
 ) -> tuple[int, int, int]:
     num_vars = int(
         rng.integers(
-            int(cfg.num_variables_min),
-            int(cfg.num_variables_max) + 1,
+            cfg.num_variables_min,
+            cfg.num_variables_max + 1,
         )
     )
 
-    series_len_min = max(int(cfg.series_length_min), _required_min_series_length(cfg))
-    series_len_max = int(cfg.series_length_max)
+    series_len_min = max(cfg.series_length_min, _required_min_series_length(cfg))
+    series_len_max = cfg.series_length_max
     if series_len_min > series_len_max:
         raise ValueError(
             "series_length_max is too small for feature/horizon safety: "
@@ -246,9 +244,7 @@ def _fit_feature_budget(x: np.ndarray, *, num_features: int) -> np.ndarray:
 
 def _pad_rows_3d(x: np.ndarray, *, row_budget: int) -> np.ndarray:
     if x.shape[1] > row_budget:
-        raise RuntimeError(
-            f"Row count N={x.shape[1]} exceeds row_budget={row_budget}."
-        )
+        raise RuntimeError(f"Row count N={x.shape[1]} exceeds row_budget={row_budget}.")
     if x.shape[1] == row_budget:
         return x
     pad_rows = row_budget - x.shape[1]
@@ -257,9 +253,7 @@ def _pad_rows_3d(x: np.ndarray, *, row_budget: int) -> np.ndarray:
 
 def _pad_rows_2d(y: np.ndarray, *, row_budget: int) -> np.ndarray:
     if y.shape[1] > row_budget:
-        raise RuntimeError(
-            f"Row count N={y.shape[1]} exceeds row_budget={row_budget}."
-        )
+        raise RuntimeError(f"Row count N={y.shape[1]} exceeds row_budget={row_budget}.")
     if y.shape[1] == row_budget:
         return y
     pad_rows = row_budget - y.shape[1]

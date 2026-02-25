@@ -65,7 +65,7 @@ class ProtocolConfig(_FrozenConfigModel):
 
     @property
     def required_lag(self) -> int:
-        return max(int(self.max_feature_lag), int(max(self.explicit_lags)))
+        return max(self.max_feature_lag, max(self.explicit_lags))
 
 
 class ModelConfig(_FrozenConfigModel):

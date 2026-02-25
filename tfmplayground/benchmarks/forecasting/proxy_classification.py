@@ -27,11 +27,11 @@ def choose_num_classes(
         raise ValueError("min_samples_per_class must be >= 1.")
 
     y = np.asarray(y_train, dtype=np.float64).reshape(-1)
-    n_train = int(y.size)
+    n_train = y.size
     if n_train < 2:
         raise ValueError("Need at least 2 train samples to build classes.")
 
-    feasible_max = n_train // int(min_samples_per_class)
+    feasible_max = n_train // min_samples_per_class
     if feasible_max < 2:
         raise ValueError(
             "Not enough train samples for at least 2 classes under "
@@ -44,11 +44,11 @@ def choose_num_classes(
         suggested = int(np.round(cube_root_scale * np.cbrt(float(n_train))))
         requested = max(2, suggested)
     else:
-        requested = int(num_classes)
+        requested = num_classes
         if requested < 2:
             raise ValueError("num_classes must be >= 2.")
 
-    return int(min(requested, feasible_max))
+    return min(requested, feasible_max)
 
 
 def fit_quantile_binner(
@@ -67,7 +67,7 @@ def fit_quantile_binner(
 
     # Attempt requested class count first, then back off deterministically if
     # quantiles collapse on tied targets.
-    for cls_count in range(int(num_classes), 1, -1):
+    for cls_count in range(num_classes, 1, -1):
         if y.size < max(cls_count * min_samples_per_class, 2):
             continue
         q = np.linspace(0.0, 1.0, cls_count + 1)

@@ -11,11 +11,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-_CANDIDATE_MODEL = "nanotabpfn_dynscm"
-_BASELINE_MODELS = ("nanotabpfn_standard", "tabicl_regressor")
-_PRIMARY_BASELINE = "nanotabpfn_standard"
-_NICL_REGRESSION_MODEL = "nicl_regression"
-
 from .adapters import (
     AdapterSkipError,
     build_forecast_table_from_series,
@@ -37,6 +32,11 @@ from .proxy_classification import (
     transform_to_classes,
 )
 from .report import build_markdown_report, write_json
+
+_CANDIDATE_MODEL = "nanotabpfn_dynscm"
+_BASELINE_MODELS = ("nanotabpfn_standard", "tabicl_regressor")
+_PRIMARY_BASELINE = "nanotabpfn_standard"
+_NICL_REGRESSION_MODEL = "nicl_regression"
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,7 +165,8 @@ def evaluate_regression(
                     )
                     if pred.shape != y_test.shape:
                         raise ValueError(
-                            f"Prediction shape {pred.shape} does not match target shape {y_test.shape}."
+                            f"Prediction shape {pred.shape} does not"
+                            f" match target shape {y_test.shape}."
                         )
                 except AdapterSkipError as exc:
                     rows.append(
@@ -450,7 +451,7 @@ def summarize_regression(
             "comparisons": [],
             "claim": {
                 "primary_claim_pass": False,
-                "required_metric_passes": int(cfg.stats.min_metrics_to_pass),
+                "required_metric_passes": cfg.stats.min_metrics_to_pass,
                 "achieved_metric_passes": 0,
             },
         }
@@ -461,7 +462,7 @@ def summarize_regression(
             "comparisons": [],
             "claim": {
                 "primary_claim_pass": False,
-                "required_metric_passes": int(cfg.stats.min_metrics_to_pass),
+                "required_metric_passes": cfg.stats.min_metrics_to_pass,
                 "achieved_metric_passes": 0,
             },
         }
@@ -548,9 +549,9 @@ def summarize_regression(
 
     claim = {
         "primary_claim_pass": achieved_passes_vs_standard
-        >= int(cfg.stats.min_metrics_to_pass),
-        "required_metric_passes": int(cfg.stats.min_metrics_to_pass),
-        "achieved_metric_passes": int(achieved_passes_vs_standard),
+        >= cfg.stats.min_metrics_to_pass,
+        "required_metric_passes": cfg.stats.min_metrics_to_pass,
+        "achieved_metric_passes": achieved_passes_vs_standard,
     }
 
     return {

@@ -43,7 +43,7 @@ def sample_regime_path(
     """Sample a sticky Markov regime path with values in [0, K)."""
 
     generator = cfg.make_rng(seed) if rng is None else rng
-    num_regimes = int(cfg.num_regimes)
+    num_regimes = cfg.num_regimes
 
     path = np.empty((num_steps,), dtype=np.int64)
     if num_regimes == 1:
@@ -115,7 +115,7 @@ def simulate_dynscm_series(
         regime_path=regime_path,
     )
 
-    max_attempts = int(max(1, cfg.max_resample_attempts))
+    max_attempts = max(1, cfg.max_resample_attempts)
     fallback: (
         tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int] | None
     ) = None
