@@ -1,0 +1,42 @@
+# VCS / editor
+.git
+.gitignore
+.vscode/
+.idea/
+
+# Python caches / virtual envs
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local environment / secrets
+.env
+.env.*
+
+# Build/test outputs
+build/
+dist/
+*.egg-info/
+.coverage
+htmlcov/
+
+# Local project artifacts
+workdir/
+notebooks/
+tests/
+*.ipynb
+
+# OS clutter
+.DS_Store
+Thumbs.db
+
+# Docker/CI leftovers
+*.log
+
+loc_*
