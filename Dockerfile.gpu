@@ -1,0 +1,53 @@
+# Multi-stage build: copy Python 3.12 from official image onto CUDA runtime.
+
+FROM python:3.12-slim-bookworm AS python-base
+
+FROM nvidia/cuda:12.6.2-cudnn-runtime-ubuntu22.04
+
+WORKDIR /app
+
+# Minimal runtime dependencies.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    git \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy Python 3.12 runtime from upstream image.
+COPY --from=python-base /usr/local/bin/python3.12 /usr/local/bin/python3.12
+COPY --from=python-base /usr/local/lib/python3.12 /usr/local/lib/python3.12
+COPY --from=python-base /usr/local/lib/libpython3.12.so.1.0 /usr/local/lib/libpython3.12.so.1.0
+COPY --from=python-base /usr/local/include/python3.12 /usr/local/include/python3.12
+COPY --from=python-base /usr/local/bin/pip* /usr/local/bin/
+COPY --from=python-base /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+
+RUN ln -sf /usr/local/bin/python3.12 /usr/local/bin/python3 && \
+    ln -sf /usr/local/bin/python3.12 /usr/local/bin/python && \
+    ldconfig
+
+RUN python --version && pip --version
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu126 \
+    LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH} \
+    CUBLAS_WORKSPACE_CONFIG=:4096:8 \
+    HYDRA_FULL_ERROR=1 \
+    PYTHONPATH=/app
+
+# Install project dependencies and package.
+COPY pyproject.toml README.md /app/
+COPY tfmplayground /app/tfmplayground
+COPY pretrain_regression.py /app/pretrain_regression.py
+COPY pretrain_classification.py /app/pretrain_classification.py
+COPY scripts /app/scripts
+
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install google-cloud-storage && \
+    pip install -e .
+
+# Copy rest of repository (tests/notebooks are ignored at runtime but harmless).
+COPY . /app
+
+ENTRYPOINT ["python"]
+CMD ["pretrain_regression.py", "--help"]

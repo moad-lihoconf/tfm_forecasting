@@ -258,6 +258,47 @@ Generated artifacts:
 - `workdir/forecast_results/proxy_summary.json`
 - `workdir/forecast_results/report.md`
 
+### Vertex GPU Training (DynSCM Regression)
+
+This repository supports a GCS-canonical workflow so synthetic data can be generated
+locally or in cloud, then trained on Vertex GPU with the same paths.
+
+1. Build and optionally push the GPU image:
+```bash
+export VERTEX_PROJECT="your-gcp-project"
+export VERTEX_REGION="us-central1"
+bash scripts/update_docker_gpu.sh --push
+```
+
+2. Generate a DynSCM prior directly to GCS (or generate locally and upload):
+```bash
+python -m tfmplayground.priors --lib dynscm \
+  --num_batches 200 --batch_size 8 \
+  --max_seq_len 64 --max_features 128 \
+  --max_classes 0 \
+  --save_path gs://your-bucket/tfm_forecasting/priors/dynscm_prior.h5
+```
+
+3. Submit a Vertex GPU regression job (dry-run first):
+```bash
+bash scripts/submit_vertex_regression.sh \
+  --priordump gs://your-bucket/tfm_forecasting/priors/dynscm_prior.h5 \
+  --run-name dynscm-vertex-regression \
+  --dry-run
+```
+Then remove `--dry-run` to submit.
+
+4. Sync run outputs back to local:
+```bash
+bash scripts/sync_vertex_outputs.sh \
+  gs://your-bucket/tfm_forecasting/runs/dynscm-vertex-regression
+```
+
+Canonical storage layout:
+- Priors: `gs://<bucket>/tfm_forecasting/priors/<name>.h5`
+- Run outputs: `gs://<bucket>/tfm_forecasting/runs/<run_name>/...`
+- Local mirror: `workdir/vertex_runs/<run_name>/...`
+
 ### Supported Priors
 
 - [TabICL](https://github.com/soda-inria/tabicl) (Classification)

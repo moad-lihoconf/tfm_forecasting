@@ -3,9 +3,14 @@
 import argparse
 import json
 import random
+import shutil
+import tempfile
+from pathlib import Path
 
 import numpy as np
 import torch
+
+from tfmplayground.gcs_utils import is_gcs_uri, upload_local_file_to_gcs
 
 from .dataloader import (
     DynSCMPriorDataLoader,
@@ -303,12 +308,24 @@ def main():
             device=device,
         )
 
-    dump_prior_to_h5(
-        prior,
-        args.max_classes,
-        args.batch_size,
-        args.save_path,
-        problem_type,
-        args.max_seq_len,
-        args.max_features,
-    )
+    local_save_path = args.save_path
+    temp_dir: Path | None = None
+    if is_gcs_uri(args.save_path):
+        temp_dir = Path(tempfile.mkdtemp(prefix="tfmplayground_prior_dump_"))
+        local_save_path = str(temp_dir / Path(args.save_path).name)
+
+    try:
+        dump_prior_to_h5(
+            prior,
+            args.max_classes,
+            args.batch_size,
+            local_save_path,
+            problem_type,
+            args.max_seq_len,
+            args.max_features,
+        )
+        if is_gcs_uri(args.save_path):
+            upload_local_file_to_gcs(local_save_path, args.save_path)
+    finally:
+        if temp_dir is not None:
+            shutil.rmtree(temp_dir, ignore_errors=True)
