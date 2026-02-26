@@ -24,28 +24,68 @@ def _compute_loss(
     classification_task: bool,
 ) -> torch.Tensor:
     single_eval_pos = full_data["single_eval_pos"]
-    data = (
-        full_data["x"].to(device),
-        full_data["y"][:, :single_eval_pos].to(device),
-    )
-    targets = full_data["target_y"].to(device)
+    x = full_data["x"].to(device)
+    y = full_data["y"].to(device)
+    target_y = full_data["target_y"].to(device)
 
-    if regression_task:
-        y_mean = data[1].mean(dim=1, keepdim=True)
-        y_std = data[1].std(dim=1, keepdim=True) + 1e-8
-        y_norm = (data[1] - y_mean) / y_std
-        data = (data[0], y_norm)
+    def _loss_for_fixed_eval_pos(
+        x_batch: torch.Tensor,
+        y_batch: torch.Tensor,
+        target_y_batch: torch.Tensor,
+        eval_pos: int,
+    ) -> torch.Tensor:
+        data = (x_batch, y_batch[:, :eval_pos])
+        targets = target_y_batch[:, eval_pos:]
 
-    output = wrapped_model(data, single_eval_pos=single_eval_pos)
-    targets = targets[:, single_eval_pos:]
-    if regression_task:
-        targets = (targets - y_mean) / y_std
-    if classification_task:
-        targets = targets.reshape((-1,)).to(torch.long)
-        output = output.view(-1, output.shape[-1])
+        if regression_task:
+            y_mean = data[1].mean(dim=1, keepdim=True)
+            y_std = data[1].std(dim=1, keepdim=True) + 1e-8
+            data = (data[0], (data[1] - y_mean) / y_std)
+            targets = (targets - y_mean) / y_std
 
-    losses = criterion(output, targets)
-    return losses.mean()
+        output = wrapped_model(data, single_eval_pos=eval_pos)
+        if classification_task:
+            targets = targets.reshape((-1,)).to(torch.long)
+            output = output.view(-1, output.shape[-1])
+
+        losses = criterion(output, targets)
+        return losses.mean()
+
+    if isinstance(single_eval_pos, int):
+        return _loss_for_fixed_eval_pos(x, y, target_y, int(single_eval_pos))
+
+    if torch.is_tensor(single_eval_pos):
+        if single_eval_pos.ndim == 0:
+            return _loss_for_fixed_eval_pos(x, y, target_y, int(single_eval_pos.item()))
+        if single_eval_pos.ndim != 1:
+            raise ValueError("single_eval_pos tensor must be scalar or 1D.")
+        if single_eval_pos.shape[0] != x.shape[0]:
+            raise ValueError(
+                "single_eval_pos batch dimension does not match input batch size."
+            )
+
+        sep = single_eval_pos.to(device=x.device, dtype=torch.long)
+        unique_sep = torch.unique(sep)
+        weighted_loss = torch.tensor(0.0, device=device)
+        total = 0
+        for eval_pos in unique_sep.tolist():
+            mask = sep == int(eval_pos)
+            if not torch.any(mask):
+                continue
+            batch_count = int(mask.sum().item())
+            batch_loss = _loss_for_fixed_eval_pos(
+                x[mask],
+                y[mask],
+                target_y[mask],
+                int(eval_pos),
+            )
+            weighted_loss = weighted_loss + batch_loss * batch_count
+            total += batch_count
+        if total == 0:
+            return torch.tensor(float("nan"), device=device)
+        return weighted_loss / total
+
+    raise TypeError("single_eval_pos must be int or torch.Tensor.")
 
 
 @torch.no_grad()
@@ -173,9 +213,8 @@ def train(
                 enumerate(prior), total=len(prior), desc=f"Epoch {epoch}", leave=False
             )
             for i, full_data in pbar:
-                single_eval_pos = full_data["single_eval_pos"]
                 x_train = full_data["x"].to(device)
-                y_train = full_data["y"][:, :single_eval_pos].to(device)
+                y_train = full_data["y"].to(device)
                 if torch.isnan(x_train).any() or torch.isnan(y_train).any():
                     continue
                 loss = _compute_loss(

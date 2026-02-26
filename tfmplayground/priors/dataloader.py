@@ -147,6 +147,14 @@ class PriorDumpDataLoader(DataLoader):
                 single_eval_pos = f["single_eval_pos"][sorted_idx][inverse_order]
                 x = torch.from_numpy(x_np)
                 y = torch.from_numpy(y_np)
+                single_eval_pos_tensor = torch.as_tensor(
+                    single_eval_pos, dtype=torch.long, device=self.device
+                )
+                single_eval_pos_value: int | torch.Tensor
+                if torch.all(single_eval_pos_tensor == single_eval_pos_tensor[0]):
+                    single_eval_pos_value = int(single_eval_pos_tensor[0].item())
+                else:
+                    single_eval_pos_value = single_eval_pos_tensor
 
                 yield dict(
                     x=x.to(self.device),
@@ -154,7 +162,7 @@ class PriorDumpDataLoader(DataLoader):
                     target_y=y.to(
                         self.device
                     ),  # target_y is identical to y (for downstream compatibility)
-                    single_eval_pos=single_eval_pos[0].item(),
+                    single_eval_pos=single_eval_pos_value,
                 )
 
     def __len__(self):

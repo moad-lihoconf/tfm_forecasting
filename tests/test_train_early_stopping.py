@@ -143,3 +143,22 @@ def test_honors_max_train_seconds(monkeypatch):
         max_train_seconds=0,
     )
     assert info["stop_reason"] == "time_limit"
+
+
+def test_compute_loss_supports_per_sample_single_eval_pos():
+    model = _model().to(torch.device("cpu"))
+    full_data = {
+        "x": torch.randn(2, 5, 3, dtype=torch.float32),
+        "y": torch.randint(0, 3, (2, 5), dtype=torch.float32),
+        "target_y": torch.randint(0, 3, (2, 5), dtype=torch.float32),
+        "single_eval_pos": torch.tensor([2, 3], dtype=torch.long),
+    }
+    loss = train_mod._compute_loss(
+        wrapped_model=model,
+        criterion=nn.CrossEntropyLoss(),
+        full_data=full_data,
+        device=torch.device("cpu"),
+        regression_task=False,
+        classification_task=True,
+    )
+    assert torch.isfinite(loss)

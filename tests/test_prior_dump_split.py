@@ -60,6 +60,37 @@ def test_prior_dump_train_val_split_indices_are_disjoint_and_deterministic(
     # x is filled by source row id, so unique values identify split membership.
     train_batch = next(iter(train_loader))
     val_batch = next(iter(val_loader))
+    assert isinstance(train_batch["single_eval_pos"], int)
+    assert isinstance(val_batch["single_eval_pos"], int)
     train_ids = set(torch.unique(train_batch["x"]).to(torch.int64).tolist())
     val_ids = set(torch.unique(val_batch["x"]).to(torch.int64).tolist())
     assert train_ids.isdisjoint(val_ids)
+
+
+def test_prior_dump_loader_preserves_per_row_single_eval_pos(tmp_path: Path):
+    dump_path = tmp_path / "mixed_eval_pos.h5"
+    with h5py.File(dump_path, "w") as f:
+        x = np.zeros((4, 6, 2), dtype=np.float32)
+        y = np.zeros((4, 6), dtype=np.float32)
+        num_features = np.full((4,), 2, dtype=np.int32)
+        single_eval_pos = np.array([2, 4, 2, 4], dtype=np.int32)
+        for i in range(4):
+            x[i, :, :] = float(i)
+            y[i, :] = float(i)
+        f.create_dataset("X", data=x)
+        f.create_dataset("y", data=y)
+        f.create_dataset("num_features", data=num_features)
+        f.create_dataset("single_eval_pos", data=single_eval_pos)
+        f.create_dataset("problem_type", data=np.bytes_("regression"))
+
+    loader = PriorDumpDataLoader(
+        filename=str(dump_path),
+        num_steps=1,
+        batch_size=2,
+        device=torch.device("cpu"),
+        indices=[0, 1],
+    )
+    batch = next(iter(loader))
+    assert torch.is_tensor(batch["single_eval_pos"])
+    assert batch["single_eval_pos"].dtype == torch.long
+    assert batch["single_eval_pos"].tolist() == [2, 4]
