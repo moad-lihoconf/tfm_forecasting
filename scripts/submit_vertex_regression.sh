@@ -49,51 +49,105 @@ SERVICE_ACCOUNT="${VERTEX_SERVICE_ACCOUNT:-}"
 DRY_RUN=0
 EXTRA_ARGS=()
 
+require_value() {
+  local opt="$1"
+  local val="${2-}"
+  if [[ -z "$val" || "$val" == --* ]]; then
+    echo "Error: ${opt} requires a non-empty value." >&2
+    exit 2
+  fi
+  printf '%s\n' "$val"
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --priordump)
-      PRIORDUMP="${2:-}"
+      PRIORDUMP="$(require_value "$1" "${2-}")"
       shift 2
+      ;;
+    --priordump=*)
+      PRIORDUMP="$(require_value "--priordump" "${1#*=}")"
+      shift
       ;;
     --run-name)
-      RUN_NAME="${2:-}"
+      RUN_NAME="$(require_value "$1" "${2-}")"
       shift 2
+      ;;
+    --run-name=*)
+      RUN_NAME="$(require_value "--run-name" "${1#*=}")"
+      shift
       ;;
     --display-name)
-      DISPLAY_NAME="${2:-}"
+      DISPLAY_NAME="$(require_value "$1" "${2-}")"
       shift 2
+      ;;
+    --display-name=*)
+      DISPLAY_NAME="$(require_value "--display-name" "${1#*=}")"
+      shift
       ;;
     --project)
-      PROJECT="${2:-}"
+      PROJECT="$(require_value "$1" "${2-}")"
       shift 2
+      ;;
+    --project=*)
+      PROJECT="$(require_value "--project" "${1#*=}")"
+      shift
       ;;
     --region)
-      REGION="${2:-}"
+      REGION="$(require_value "$1" "${2-}")"
       shift 2
+      ;;
+    --region=*)
+      REGION="$(require_value "--region" "${1#*=}")"
+      shift
       ;;
     --bucket)
-      BUCKET_INPUT="${2:-}"
+      BUCKET_INPUT="$(require_value "$1" "${2-}")"
       shift 2
+      ;;
+    --bucket=*)
+      BUCKET_INPUT="$(require_value "--bucket" "${1#*=}")"
+      shift
       ;;
     --image)
-      IMAGE_URI="${2:-}"
+      IMAGE_URI="$(require_value "$1" "${2-}")"
       shift 2
+      ;;
+    --image=*)
+      IMAGE_URI="$(require_value "--image" "${1#*=}")"
+      shift
       ;;
     --machine-type)
-      MACHINE_TYPE="${2:-}"
+      MACHINE_TYPE="$(require_value "$1" "${2-}")"
       shift 2
+      ;;
+    --machine-type=*)
+      MACHINE_TYPE="$(require_value "--machine-type" "${1#*=}")"
+      shift
       ;;
     --accelerator-type)
-      ACCELERATOR_TYPE="${2:-}"
+      ACCELERATOR_TYPE="$(require_value "$1" "${2-}")"
       shift 2
+      ;;
+    --accelerator-type=*)
+      ACCELERATOR_TYPE="$(require_value "--accelerator-type" "${1#*=}")"
+      shift
       ;;
     --accelerator-count)
-      ACCELERATOR_COUNT="${2:-}"
+      ACCELERATOR_COUNT="$(require_value "$1" "${2-}")"
       shift 2
       ;;
+    --accelerator-count=*)
+      ACCELERATOR_COUNT="$(require_value "--accelerator-count" "${1#*=}")"
+      shift
+      ;;
     --service-account)
-      SERVICE_ACCOUNT="${2:-}"
+      SERVICE_ACCOUNT="$(require_value "$1" "${2-}")"
       shift 2
+      ;;
+    --service-account=*)
+      SERVICE_ACCOUNT="$(require_value "--service-account" "${1#*=}")"
+      shift
       ;;
     --dry-run)
       DRY_RUN=1
@@ -208,7 +262,7 @@ else
 fi
 
 TRAIN_ARGS=(
-  pretrain_regression.py
+  /app/pretrain_regression.py
   "--priordump=${PRIOR_URI}"
   "--saveweights=${WEIGHTS_URI}"
   "--savebuckets=${BUCKETS_URI}"

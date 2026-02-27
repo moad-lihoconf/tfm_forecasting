@@ -59,9 +59,14 @@ def test_submit_vertex_script_dry_run_local_prior(tmp_path: Path) -> None:
     expected_prior_uri = (
         "[dry-run] prior_uri: gs://test-bucket/tfm_forecasting/priors/prior.h5"
     )
+    expected_image_uri = (
+        "[dry-run] image: "
+        "us-central1-docker.pkg.dev/test-project/tfm-forecasting/trainer-gpu:latest"
+    )
     assert expected_prior_uri in stdout
     assert "gcloud storage cp" in stdout
     assert "--display-name tfm-regression-run_local" in stdout
+    assert expected_image_uri in stdout
 
 
 def test_submit_vertex_script_dry_run_gcs_prior(tmp_path: Path) -> None:
@@ -95,6 +100,11 @@ def test_submit_vertex_script_dry_run_gcs_prior(tmp_path: Path) -> None:
     expected_prior_uri = (
         "[dry-run] prior_uri: gs://existing-bucket/tfm_forecasting/priors/already.h5"
     )
+    expected_image_uri = (
+        "[dry-run] image: "
+        "us-central1-docker.pkg.dev/test-project/tfm-forecasting/trainer-gpu:latest"
+    )
     assert expected_prior_uri in stdout
     assert "upload command: <none, gs:// priordump already accessible>" in stdout
     assert "gcloud storage cp" not in stdout
+    assert expected_image_uri in stdout
