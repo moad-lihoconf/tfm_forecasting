@@ -13,6 +13,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
+# GitHub clones inside pip are more reliable over HTTP/1.1 than HTTP/2 for
+# long-lived large fetches during image builds.
+RUN git config --global http.version HTTP/1.1 && \
+    git config --global http.postBuffer 524288000
+
 # Copy Python 3.12 runtime from upstream image.
 COPY --from=python-base /usr/local/bin/python3.12 /usr/local/bin/python3.12
 COPY --from=python-base /usr/local/lib/python3.12 /usr/local/lib/python3.12
@@ -35,16 +40,100 @@ ENV PIP_NO_CACHE_DIR=1 \
     HYDRA_FULL_ERROR=1 \
     PYTHONPATH=/app
 
-# Install project dependencies and package.
+# Install third-party dependencies in a cache-friendly layer that only changes
+# when dependency metadata changes.
+COPY pyproject.toml poetry.lock README.md /tmp/build/
+
+RUN pip install --upgrade pip setuptools wheel poetry poetry-plugin-export && \
+    cd /tmp/build && \
+    poetry export --without-hashes --format requirements.txt --output requirements.txt && \
+    python - <<'PY'
+from pathlib import Path
+import re
+
+root = Path("/tmp/build")
+requirements = (root / "requirements.txt").read_text(encoding="utf-8").splitlines()
+groups = {
+    "requirements.base.txt": [],
+    "requirements.cuda_a.txt": [],
+    "requirements.cuda_b.txt": [],
+    "requirements.torch.txt": [],
+    "requirements.vcs.txt": [],
+}
+
+cuda_a_prefixes = (
+    "nvidia-cublas",
+    "nvidia-cuda-",
+    "nvidia-cudnn",
+    "nvidia-cufft",
+)
+cuda_b_prefixes = (
+    "nvidia-curand",
+    "nvidia-cusolver",
+    "nvidia-cusparse",
+    "nvidia-cusparselt",
+    "nvidia-nccl",
+    "nvidia-nvjitlink",
+    "nvidia-nvtx",
+    "nvidia-cufile",
+)
+
+for line in requirements:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        continue
+    head = stripped.split(";", 1)[0].strip()
+    if " @ " in head:
+        name = head.split(" @ ", 1)[0].strip().lower()
+    else:
+        name = re.split(r"[<>=!~ ]", head, maxsplit=1)[0].strip().lower()
+
+    if "git+" in stripped:
+        groups["requirements.vcs.txt"].append(line)
+    elif name in {"torch", "triton"}:
+        groups["requirements.torch.txt"].append(line)
+    elif name.startswith(cuda_a_prefixes):
+        groups["requirements.cuda_a.txt"].append(line)
+    elif name.startswith(cuda_b_prefixes):
+        groups["requirements.cuda_b.txt"].append(line)
+    else:
+        groups["requirements.base.txt"].append(line)
+
+for filename, lines in groups.items():
+    content = "\n".join(lines) if lines else "# empty"
+    (root / filename).write_text(content + "\n", encoding="utf-8")
+PY
+
+RUN pip install google-cloud-storage && \
+    pip install --no-deps -r /tmp/build/requirements.base.txt
+
+RUN set -eux; \
+    if ! grep -qx '# empty' /tmp/build/requirements.vcs.txt; then \
+      for attempt in 1 2 3 4 5; do \
+        if pip install --no-deps -r /tmp/build/requirements.vcs.txt; then \
+          exit 0; \
+        fi; \
+        if [ "${attempt}" -eq 5 ]; then \
+          exit 1; \
+        fi; \
+        sleep "$((attempt * 15))"; \
+      done; \
+    fi
+
+RUN pip install --no-deps -r /tmp/build/requirements.cuda_a.txt
+
+RUN pip install --no-deps -r /tmp/build/requirements.cuda_b.txt
+
+RUN pip install --no-deps -r /tmp/build/requirements.torch.txt
+
+# Copy application code after dependencies so source edits only rebuild the app layer.
 COPY pyproject.toml README.md /app/
 COPY tfmplayground /app/tfmplayground
 COPY pretrain_regression.py /app/pretrain_regression.py
 COPY pretrain_classification.py /app/pretrain_classification.py
 COPY scripts /app/scripts
 
-RUN pip install --upgrade pip setuptools wheel && \
-    pip install google-cloud-storage && \
-    pip install -e .
+RUN pip install --no-deps -e /app
 
 # Copy rest of repository (tests/notebooks are ignored at runtime but harmless).
 COPY . /app
