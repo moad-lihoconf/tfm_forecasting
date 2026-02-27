@@ -48,6 +48,13 @@ def _make_cfg(tmp_path: Path) -> ForecastBenchmarkConfig:
                 "claim_metrics": ["mase", "smape", "rmse"],
                 "min_metrics_to_pass": 2,
             },
+            "models": {
+                "enabled_regression_models": [
+                    "nanotabpfn_standard",
+                    "nanotabpfn_dynscm",
+                    "tabicl_regressor",
+                ]
+            },
         }
     )
 
@@ -124,6 +131,70 @@ def test_summarize_regression_computes_claim_fields(tmp_path: Path):
     assert "primary_claim_pass" in summary["claim"]
 
 
+def test_summarize_regression_uses_enabled_model_set(tmp_path: Path):
+    cfg = ForecastBenchmarkConfig.from_dict(
+        {
+            **_make_cfg(tmp_path).to_dict(),
+            "models": {
+                "enabled_regression_models": [
+                    "nanotabpfn_standard",
+                    "nanotabpfn_dynscm",
+                    "nicl_regression",
+                ],
+                "nicl_regression_mode": "quantized_proxy",
+                "nicl_regression_endpoint": "https://example.com/reg",
+            },
+        }
+    )
+
+    import pandas as pd
+
+    df = pd.DataFrame(
+        [
+            {
+                "dataset": "d",
+                "series_id": 0,
+                "horizon": 1,
+                "model": "nanotabpfn_standard",
+                "rmse": 1.0,
+                "smape": 1.0,
+                "mase": 1.0,
+                "status": "ok",
+                "skip_reason": "",
+            },
+            {
+                "dataset": "d",
+                "series_id": 0,
+                "horizon": 1,
+                "model": "nanotabpfn_dynscm",
+                "rmse": 0.5,
+                "smape": 0.5,
+                "mase": 0.5,
+                "status": "ok",
+                "skip_reason": "",
+            },
+            {
+                "dataset": "d",
+                "series_id": 0,
+                "horizon": 1,
+                "model": "nicl_regression",
+                "rmse": 0.8,
+                "smape": 0.8,
+                "mase": 0.8,
+                "status": "ok",
+                "skip_reason": "",
+            },
+        ]
+    )
+
+    summary = summarize_regression(df, cfg)
+
+    assert {row["baseline"] for row in summary["comparisons"]} == {
+        "nanotabpfn_standard",
+        "nicl_regression",
+    }
+
+
 def test_run_benchmark_writes_artifacts(monkeypatch, tmp_path: Path):
     cfg = _make_cfg(tmp_path)
 
@@ -147,7 +218,7 @@ def test_run_benchmark_writes_artifacts(monkeypatch, tmp_path: Path):
         lambda _cfg, device="cpu": {
             "nanotabpfn_standard": _MeanAdapter(),
             "nanotabpfn_dynscm": _LastLagAdapter(),
-            "tabicl_regressor": _MeanAdapter(),
+            "nicl_regression": _MeanAdapter(),
         },
     )
 
@@ -164,6 +235,11 @@ def test_nicl_rows_budget_limits_regression_calls(tmp_path: Path):
         {
             **_make_cfg(tmp_path).to_dict(),
             "models": {
+                "enabled_regression_models": [
+                    "nanotabpfn_standard",
+                    "nanotabpfn_dynscm",
+                    "nicl_regression",
+                ],
                 "nicl_regression_mode": "native",
                 "nicl_regression_endpoint": "https://example.com/reg",
                 "nicl_max_rows_budget": 18,
@@ -190,7 +266,6 @@ def test_nicl_rows_budget_limits_regression_calls(tmp_path: Path):
     adapters = {
         "nanotabpfn_standard": _MeanAdapter(),
         "nanotabpfn_dynscm": _LastLagAdapter(),
-        "tabicl_regressor": _MeanAdapter(),
         "nicl_regression": _MeanAdapter(),
     }
     rows = evaluate_regression(cfg, suite=suite, adapters=adapters)
@@ -208,6 +283,11 @@ def test_strict_nicl_unavailable_raises(tmp_path: Path):
         {
             **_make_cfg(tmp_path).to_dict(),
             "models": {
+                "enabled_regression_models": [
+                    "nanotabpfn_standard",
+                    "nanotabpfn_dynscm",
+                    "nicl_regression",
+                ],
                 "nicl_regression_mode": "native",
                 "nicl_fail_on_unavailable": True,
                 # no endpoint -> unavailable adapter

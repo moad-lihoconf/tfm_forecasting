@@ -80,3 +80,34 @@ def test_load_one_dataset_reports_manual_cache_requirement(tmp_path: Path):
     bundle = _load_one_dataset(spec, cfg)
     assert bundle.skipped
     assert "Provide cached data manually" in (bundle.skip_reason or "")
+
+
+def test_load_suite_reads_nan_padded_cached_panel(tmp_path: Path):
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir(parents=True)
+    series = np.array(
+        [
+            [1.0, 2.0, 3.0, np.nan],
+            [4.0, 5.0, np.nan, np.nan],
+        ],
+        dtype=np.float64,
+    )
+    np.savez_compressed(cache_dir / "m4_weekly.npz", series=series)
+    np.savez_compressed(cache_dir / "tourism_monthly.npz", series=series)
+
+    cfg = ForecastBenchmarkConfig.from_dict(
+        {
+            "datasets": {
+                "cache_dir": str(cache_dir),
+                "dataset_names": ["m4_weekly", "tourism_monthly"],
+                "allow_download": False,
+            }
+        }
+    )
+
+    suite = load_suite(cfg)
+
+    assert not suite["m4_weekly"].skipped
+    assert not suite["tourism_monthly"].skipped
+    assert suite["m4_weekly"].series.shape == (2, 4)
+    assert np.isnan(suite["tourism_monthly"].series[0, -1])

@@ -13,6 +13,10 @@ def test_cli_load_config_applies_overrides(tmp_path: Path):
         [
             "--mode",
             "regression",
+            "--enabled_regression_models",
+            "nanotabpfn_standard",
+            "nanotabpfn_dynscm",
+            "nicl_regression",
             "--model_standard_ckpt",
             "std.pth",
             "--model_dynscm_ckpt",
@@ -27,6 +31,11 @@ def test_cli_load_config_applies_overrides(tmp_path: Path):
     cfg = cli._load_config(args)
     assert isinstance(cfg, ForecastBenchmarkConfig)
     assert cfg.mode == "regression"
+    assert cfg.models.enabled_regression_models == (
+        "nanotabpfn_standard",
+        "nanotabpfn_dynscm",
+        "nicl_regression",
+    )
     assert cfg.models.model_standard_ckpt == "std.pth"
     assert cfg.models.model_dynscm_ckpt == "dyn.pth"
     assert cfg.models.tabicl_checkpoint_version == "tabicl-custom.ckpt"

@@ -1,0 +1,47 @@
+{
+  "mode": "regression",
+  "seed": 42,
+  "output_dir": "workdir/forecast_results_final_3model",
+  "datasets": {
+    "dataset_names": [
+      "exchange_rate",
+      "ettm1",
+      "m4_weekly",
+      "tourism_monthly"
+    ],
+    "max_series_per_dataset": 64,
+    "cache_dir": "workdir/forecast_data",
+    "allow_download": true
+  },
+  "protocol": {
+    "horizons": [1, 3, 6, 12],
+    "context_rows": 32,
+    "test_rows": 16,
+    "max_feature_lag": 32,
+    "explicit_lags": [0, 1, 2, 5, 10],
+    "num_kernels": 3,
+    "add_mask_channels": true
+  },
+  "models": {
+    "enabled_regression_models": [
+      "nanotabpfn_standard",
+      "nanotabpfn_dynscm",
+      "nicl_regression"
+    ],
+    "model_dynscm_ckpt": "workdir/local_1h/nanotabpfn_dynscm_1h_weights.pth",
+    "model_dynscm_dist": "workdir/local_1h/nanotabpfn_dynscm_1h_buckets.pth",
+    "nicl_regression_mode": "quantized_proxy",
+    "nicl_regression_endpoint": "https://prediction.neuralk-ai.com/predict",
+    "nicl_model": "nicl-small"
+  },
+  "stats": {
+    "bootstrap_samples": 2000,
+    "confidence_level": 0.95,
+    "claim_metrics": ["mase", "smape", "rmse"],
+    "min_metrics_to_pass": 2
+  },
+  "proxy": {
+    "num_classes": "auto",
+    "min_samples_per_class": 4
+  }
+}

@@ -1,4 +1,5 @@
 import os
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -14,6 +15,48 @@ from sklearn.preprocessing import FunctionTransformer, OrdinalEncoder
 from tfmplayground.model import NanoTabPFNModel
 from tfmplayground.utils import get_default_device
 
+_OFFICIAL_REGRESSOR_ARCH = {
+    "num_attention_heads": 4,
+    "embedding_size": 128,
+    "mlp_hidden_size": 512,
+    "num_layers": 6,
+    "num_outputs": 100,
+    "dropout": 0.0,
+}
+
+
+def _instantiate_model_from_arch_payload(arch: dict[str, Any]) -> NanoTabPFNModel:
+    return NanoTabPFNModel(
+        num_attention_heads=int(arch["num_attention_heads"]),
+        embedding_size=int(arch["embedding_size"]),
+        mlp_hidden_size=int(arch["mlp_hidden_size"]),
+        num_layers=int(arch["num_layers"]),
+        num_outputs=int(arch["num_outputs"]),
+        dropout=float(arch.get("dropout", 0.0)),
+    )
+
+
+def _looks_like_raw_model_state_dict(state_dict: Any) -> bool:
+    if not isinstance(state_dict, dict):
+        return False
+    required = {
+        "feature_encoder.linear_layer.weight",
+        "target_encoder.linear_layer.weight",
+        "decoder.linear1.weight",
+        "decoder.linear2.weight",
+    }
+    return required.issubset(state_dict.keys())
+
+
+def _normalize_official_raw_state_dict_keys(
+    state_dict: dict[str, Any],
+) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for key, value in state_dict.items():
+        new_key = key.replace(".self_attn_between_", ".self_attention_between_")
+        normalized[new_key] = value
+    return normalized
+
 
 def init_model_from_state_dict_file(file_path):
     """
@@ -21,16 +64,23 @@ def init_model_from_state_dict_file(file_path):
     instantiates the architecture and loads the weights.
     """
     state_dict = torch.load(file_path, map_location=torch.device("cpu"))
-    model = NanoTabPFNModel(
-        num_attention_heads=state_dict["architecture"]["num_attention_heads"],
-        embedding_size=state_dict["architecture"]["embedding_size"],
-        mlp_hidden_size=state_dict["architecture"]["mlp_hidden_size"],
-        num_layers=state_dict["architecture"]["num_layers"],
-        num_outputs=state_dict["architecture"]["num_outputs"],
-        dropout=float(state_dict["architecture"].get("dropout", 0.0)),
+    if (
+        isinstance(state_dict, dict)
+        and "architecture" in state_dict
+        and "model" in state_dict
+    ):
+        model = _instantiate_model_from_arch_payload(state_dict["architecture"])
+        model.load_state_dict(state_dict["model"])
+        return model
+    if _looks_like_raw_model_state_dict(state_dict):
+        model = _instantiate_model_from_arch_payload(_OFFICIAL_REGRESSOR_ARCH)
+        model.load_state_dict(_normalize_official_raw_state_dict_keys(state_dict))
+        return model
+    raise ValueError(
+        "Unsupported checkpoint format in "
+        f"{file_path!r}: expected wrapped checkpoint with architecture/model "
+        "or the official raw standard-regressor state dict."
     )
-    model.load_state_dict(state_dict["model"])
-    return model
 
 
 # doing these as lambdas would cause NanoTabPFNClassifier to not be pickle-able,

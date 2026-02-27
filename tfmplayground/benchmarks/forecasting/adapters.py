@@ -653,35 +653,48 @@ def default_regression_adapters(
     device: str | torch.device,
 ) -> dict[str, Any]:
     """Build default regression adapters used in the benchmark."""
-    adapters: dict[str, Any] = {
-        "nanotabpfn_standard": NanoTabPFNForecastAdapter(
+    enabled = set(cfg.models.enabled_regression_models)
+    adapters: dict[str, Any] = {}
+
+    if "nanotabpfn_standard" in enabled:
+        adapters["nanotabpfn_standard"] = NanoTabPFNForecastAdapter(
             name="nanotabpfn_standard",
             model_path=cfg.models.model_standard_ckpt,
             dist_path=cfg.models.model_standard_dist,
             device=device,
-        ),
-        "tabicl_regressor": TabICLForecastAdapter(
+        )
+
+    if "tabicl_regressor" in enabled:
+        adapters["tabicl_regressor"] = TabICLForecastAdapter(
             checkpoint_version=cfg.models.tabicl_checkpoint_version,
             model_path=cfg.models.tabicl_model_path,
             device=device,
-        ),
-    }
-
-    if cfg.models.model_dynscm_ckpt is None and cfg.models.model_dynscm_dist is None:
-        adapters["nanotabpfn_dynscm"] = UnavailableRegressionAdapter(
-            "nanotabpfn_dynscm",
-            "Provide --model_dynscm_ckpt (and optional --model_dynscm_dist).",
-        )
-    else:
-        adapters["nanotabpfn_dynscm"] = NanoTabPFNForecastAdapter(
-            name="nanotabpfn_dynscm",
-            model_path=cfg.models.model_dynscm_ckpt,
-            dist_path=cfg.models.model_dynscm_dist,
-            device=device,
         )
 
-    if cfg.models.nicl_regression_mode != "off":
-        if cfg.models.nicl_regression_endpoint is None:
+    if "nanotabpfn_dynscm" in enabled:
+        if (
+            cfg.models.model_dynscm_ckpt is None
+            and cfg.models.model_dynscm_dist is None
+        ):
+            adapters["nanotabpfn_dynscm"] = UnavailableRegressionAdapter(
+                "nanotabpfn_dynscm",
+                "Provide --model_dynscm_ckpt (and optional --model_dynscm_dist).",
+            )
+        else:
+            adapters["nanotabpfn_dynscm"] = NanoTabPFNForecastAdapter(
+                name="nanotabpfn_dynscm",
+                model_path=cfg.models.model_dynscm_ckpt,
+                dist_path=cfg.models.model_dynscm_dist,
+                device=device,
+            )
+
+    if "nicl_regression" in enabled:
+        if cfg.models.nicl_regression_mode == "off":
+            adapters["nicl_regression"] = UnavailableRegressionAdapter(
+                "nicl_regression",
+                "Enable models.nicl_regression_mode to use NICL regression.",
+            )
+        elif cfg.models.nicl_regression_endpoint is None:
             adapters["nicl_regression"] = UnavailableRegressionAdapter(
                 "nicl_regression",
                 "nicl_regression_endpoint is not configured.",
@@ -691,7 +704,7 @@ def default_regression_adapters(
                 api_url=cfg.models.nicl_regression_endpoint,
                 timeout_seconds=cfg.models.nicl_timeout_seconds,
                 max_retries=cfg.models.nicl_max_retries,
-                mode="quantized_proxy",
+                mode=cfg.models.nicl_regression_mode,
                 token_env=cfg.models.nicl_api_key_env,
                 model_name=cfg.models.nicl_model,
                 proxy_num_classes=cfg.proxy.num_classes,

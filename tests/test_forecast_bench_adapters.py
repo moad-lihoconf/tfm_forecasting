@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from collections import OrderedDict
+from pathlib import Path
+
 import numpy as np
 import pytest
+import torch
 
 from tfmplayground.benchmarks.forecasting.adapters import (
     AdapterSkipError,
@@ -12,6 +16,12 @@ from tfmplayground.benchmarks.forecasting.adapters import (
     default_regression_adapters,
 )
 from tfmplayground.benchmarks.forecasting.config import ForecastBenchmarkConfig
+from tfmplayground.interface import (
+    _OFFICIAL_REGRESSOR_ARCH,
+    NanoTabPFNRegressor,
+    init_model_from_state_dict_file,
+)
+from tfmplayground.model import NanoTabPFNModel
 
 
 class _DummyRegressor:
@@ -213,3 +223,69 @@ def test_nicl_regression_rejects_invalid_proxy_num_classes_string():
             mode="quantized_proxy",
             proxy_num_classes="bad",
         )
+
+
+def _make_raw_official_checkpoint(path: Path) -> Path:
+    model = NanoTabPFNModel(**_OFFICIAL_REGRESSOR_ARCH)
+    torch.save(model.state_dict(), path)
+    return path
+
+
+def _make_bucket_file(path: Path) -> Path:
+    torch.save(torch.linspace(-1.0, 1.0, 101), path)
+    return path
+
+
+def test_init_model_from_state_dict_file_supports_raw_state_dict(tmp_path: Path):
+    raw_path = _make_raw_official_checkpoint(tmp_path / "raw_model.pth")
+
+    model = init_model_from_state_dict_file(raw_path)
+
+    assert isinstance(model, NanoTabPFNModel)
+    assert model.decoder.linear2.weight.shape[0] == 100
+
+
+def test_nanotabpfn_regressor_uses_default_raw_checkpoint_layout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    checkpoints_dir = tmp_path / "checkpoints"
+    checkpoints_dir.mkdir()
+    _make_raw_official_checkpoint(checkpoints_dir / "nanotabpfn_regressor.pth")
+    _make_bucket_file(checkpoints_dir / "nanotabpfn_regressor_buckets.pth")
+    monkeypatch.chdir(tmp_path)
+
+    regressor = NanoTabPFNRegressor(model=None, dist=None, device="cpu")
+
+    assert isinstance(regressor.model, NanoTabPFNModel)
+
+
+def test_init_model_from_state_dict_file_rejects_invalid_raw_checkpoint(tmp_path: Path):
+    bad_path = tmp_path / "bad_model.pth"
+    torch.save(OrderedDict({"decoder.linear1.weight": torch.zeros((2, 2))}), bad_path)
+
+    with pytest.raises(ValueError, match="Unsupported checkpoint format"):
+        init_model_from_state_dict_file(bad_path)
+
+
+def test_default_regression_adapters_honors_enabled_model_selection():
+    cfg = ForecastBenchmarkConfig.from_dict(
+        {
+            "models": {
+                "enabled_regression_models": [
+                    "nanotabpfn_standard",
+                    "nanotabpfn_dynscm",
+                    "nicl_regression",
+                ],
+                "nicl_regression_mode": "quantized_proxy",
+                "nicl_regression_endpoint": "https://example.com/reg",
+            }
+        }
+    )
+
+    adapters = default_regression_adapters(cfg, device="cpu")
+
+    assert set(adapters) == {
+        "nanotabpfn_standard",
+        "nanotabpfn_dynscm",
+        "nicl_regression",
+    }

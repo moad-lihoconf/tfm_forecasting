@@ -26,6 +26,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional path to ForecastBenchmarkConfig JSON.",
     )
     parser.add_argument(
+        "--enabled_regression_models",
+        nargs="+",
+        choices=[
+            "nanotabpfn_standard",
+            "nanotabpfn_dynscm",
+            "nicl_regression",
+            "tabicl_regressor",
+        ],
+        default=None,
+        help="Explicit regression model set for the benchmark run.",
+    )
+    parser.add_argument(
         "--model_standard_ckpt",
         type=str,
         default=None,
@@ -108,6 +120,10 @@ def _load_config(args: argparse.Namespace) -> ForecastBenchmarkConfig:
         payload["output_dir"] = Path(args.output_dir)
 
     models_payload = dict(payload["models"])
+    if args.enabled_regression_models is not None:
+        models_payload["enabled_regression_models"] = tuple(
+            args.enabled_regression_models
+        )
     for arg_name, model_key in (
         ("model_standard_ckpt", "model_standard_ckpt"),
         ("model_standard_dist", "model_standard_dist"),

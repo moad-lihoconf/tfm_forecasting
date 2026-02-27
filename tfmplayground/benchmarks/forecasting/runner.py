@@ -34,7 +34,6 @@ from .proxy_classification import (
 from .report import build_markdown_report, write_json
 
 _CANDIDATE_MODEL = "nanotabpfn_dynscm"
-_BASELINE_MODELS = ("nanotabpfn_standard", "tabicl_regressor")
 _PRIMARY_BASELINE = "nanotabpfn_standard"
 _NICL_REGRESSION_MODEL = "nicl_regression"
 
@@ -468,7 +467,11 @@ def summarize_regression(
         }
 
     candidate_model = _CANDIDATE_MODEL
-    baselines = _BASELINE_MODELS
+    baselines = [
+        model_name
+        for model_name in cfg.models.enabled_regression_models
+        if model_name != candidate_model
+    ]
     key_cols = ["dataset", "series_id", "horizon"]
 
     comparisons: list[dict[str, Any]] = []
@@ -669,6 +672,8 @@ def _validate_nicl_regression_availability(
     cfg: ForecastBenchmarkConfig,
     adapters: dict[str, Any],
 ) -> None:
+    if _NICL_REGRESSION_MODEL not in cfg.models.enabled_regression_models:
+        return
     if cfg.models.nicl_regression_mode == "off":
         return
     nicl_adapter = adapters.get(_NICL_REGRESSION_MODEL)

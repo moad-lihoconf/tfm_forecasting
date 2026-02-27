@@ -19,6 +19,13 @@ DEFAULT_MEDIUM_SUITE: tuple[str, ...] = (
     "exchange_rate",
 )
 
+RegressionModelName = Literal[
+    "nanotabpfn_standard",
+    "nanotabpfn_dynscm",
+    "nicl_regression",
+    "tabicl_regressor",
+]
+
 
 class _FrozenConfigModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -71,6 +78,11 @@ class ProtocolConfig(_FrozenConfigModel):
 class ModelConfig(_FrozenConfigModel):
     """Model and checkpoint settings for baselines."""
 
+    enabled_regression_models: tuple[RegressionModelName, ...] = (
+        "nanotabpfn_standard",
+        "nanotabpfn_dynscm",
+        "tabicl_regressor",
+    )
     model_standard_ckpt: str | None = None
     model_standard_dist: str | None = None
     model_dynscm_ckpt: str | None = None
@@ -86,6 +98,25 @@ class ModelConfig(_FrozenConfigModel):
     nicl_fail_on_unavailable: bool = False
     nicl_timeout_seconds: float = Field(default=20.0, gt=0.0)
     nicl_max_retries: int = Field(default=3, ge=1)
+
+    @field_validator("enabled_regression_models")
+    @classmethod
+    def _validate_enabled_regression_models(
+        cls, value: tuple[RegressionModelName, ...]
+    ) -> tuple[RegressionModelName, ...]:
+        if not value:
+            raise ValueError("enabled_regression_models must be non-empty.")
+        if len(set(value)) != len(value):
+            raise ValueError("enabled_regression_models must not contain duplicates.")
+        if "nanotabpfn_standard" not in value:
+            raise ValueError(
+                "enabled_regression_models must include 'nanotabpfn_standard'."
+            )
+        if "nanotabpfn_dynscm" not in value:
+            raise ValueError(
+                "enabled_regression_models must include 'nanotabpfn_dynscm'."
+            )
+        return value
 
 
 class StatisticsConfig(_FrozenConfigModel):

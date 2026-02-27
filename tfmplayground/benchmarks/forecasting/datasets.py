@@ -79,7 +79,10 @@ DEFAULT_DATASET_SPECS: dict[str, DatasetSpec] = {
         seasonality=52,
         cache_file="m4_weekly.npz",
         source_url=None,
-        notes="Provide cached npz manually (key='series').",
+        notes=(
+            "Prepare cached npz with scripts/prepare_forecast_datasets.py "
+            "(key='series')."
+        ),
     ),
     "tourism_monthly": DatasetSpec(
         name="tourism_monthly",
@@ -87,7 +90,10 @@ DEFAULT_DATASET_SPECS: dict[str, DatasetSpec] = {
         seasonality=12,
         cache_file="tourism_monthly.npz",
         source_url=None,
-        notes="Provide cached npz manually (key='series').",
+        notes=(
+            "Prepare cached npz with scripts/prepare_forecast_datasets.py "
+            "(key='series')."
+        ),
     ),
     "tourism_quarterly": DatasetSpec(
         name="tourism_quarterly",
