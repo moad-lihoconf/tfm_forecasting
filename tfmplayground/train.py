@@ -1,6 +1,7 @@
 import os
 import time
 from collections.abc import Sequence
+from contextlib import nullcontext
 from typing import Any
 
 import schedulefree
@@ -27,15 +28,24 @@ def _compute_loss(
     x = full_data["x"].to(device)
     y = full_data["y"].to(device)
     target_y = full_data["target_y"].to(device)
+    target_mask_full = full_data.get("target_mask")
+    if target_mask_full is not None:
+        target_mask_full = target_mask_full.to(device=device, dtype=torch.bool)
+        if target_mask_full.ndim != 2:
+            raise ValueError("target_mask must have shape (batch_size, num_rows).")
+        if target_mask_full.shape != y.shape:
+            raise ValueError("target_mask shape must match y/target_y shape.")
 
     def _loss_for_fixed_eval_pos(
         x_batch: torch.Tensor,
         y_batch: torch.Tensor,
         target_y_batch: torch.Tensor,
         eval_pos: int,
+        target_mask_batch: torch.Tensor | None = None,
     ) -> torch.Tensor:
         data = (x_batch, y_batch[:, :eval_pos])
         targets = target_y_batch[:, eval_pos:]
+        mask = None if target_mask_batch is None else target_mask_batch[:, eval_pos:]
 
         if regression_task:
             y_mean = data[1].mean(dim=1, keepdim=True)
@@ -47,16 +57,41 @@ def _compute_loss(
         if classification_task:
             targets = targets.reshape((-1,)).to(torch.long)
             output = output.view(-1, output.shape[-1])
+            if mask is not None:
+                mask_flat = mask.reshape(-1)
+                if not torch.any(mask_flat):
+                    return torch.tensor(float("nan"), device=device)
+                targets = targets[mask_flat]
+                output = output[mask_flat]
 
         losses = criterion(output, targets)
-        return losses.mean()
+        if mask is None or classification_task:
+            return losses.mean() if losses.ndim > 0 else losses
+        if losses.ndim == 0:
+            return losses
+        masked_losses = losses[mask]
+        if masked_losses.numel() == 0:
+            return torch.tensor(float("nan"), device=device)
+        return masked_losses.mean()
 
     if isinstance(single_eval_pos, int):
-        return _loss_for_fixed_eval_pos(x, y, target_y, int(single_eval_pos))
+        return _loss_for_fixed_eval_pos(
+            x,
+            y,
+            target_y,
+            int(single_eval_pos),
+            target_mask_full,
+        )
 
     if torch.is_tensor(single_eval_pos):
         if single_eval_pos.ndim == 0:
-            return _loss_for_fixed_eval_pos(x, y, target_y, int(single_eval_pos.item()))
+            return _loss_for_fixed_eval_pos(
+                x,
+                y,
+                target_y,
+                int(single_eval_pos.item()),
+                target_mask_full,
+            )
         if single_eval_pos.ndim != 1:
             raise ValueError("single_eval_pos tensor must be scalar or 1D.")
         if single_eval_pos.shape[0] != x.shape[0]:
@@ -78,6 +113,7 @@ def _compute_loss(
                 y[mask],
                 target_y[mask],
                 int(eval_pos),
+                target_mask_full[mask] if target_mask_full is not None else None,
             )
             weighted_loss = weighted_loss + batch_loss * batch_count
             total += batch_count
@@ -96,23 +132,43 @@ def _evaluate_prior_loss(
     device: torch.device,
     regression_task: bool,
     classification_task: bool,
+    amp_enabled: bool = False,
+    amp_dtype: torch.dtype = torch.float16,
 ) -> float:
     wrapped_model.eval()
     loss_sum = 0.0
     count = 0
-    for full_data in val_prior:
-        current_loss = _compute_loss(
-            wrapped_model=wrapped_model,
-            criterion=criterion,
-            full_data=full_data,
-            device=device,
-            regression_task=regression_task,
-            classification_task=classification_task,
-        )
-        if torch.isnan(current_loss):
-            continue
-        loss_sum += float(current_loss.detach().cpu().item())
-        count += 1
+    initial_pointer = None
+    if hasattr(val_prior, "pointer"):
+        pointer_value = val_prior.pointer
+        if isinstance(pointer_value, int):
+            initial_pointer = pointer_value
+    try:
+        for full_data in val_prior:
+            autocast_ctx = (
+                torch.autocast(
+                    device_type=device.type,
+                    dtype=amp_dtype,
+                )
+                if amp_enabled
+                else nullcontext()
+            )
+            with autocast_ctx:
+                current_loss = _compute_loss(
+                    wrapped_model=wrapped_model,
+                    criterion=criterion,
+                    full_data=full_data,
+                    device=device,
+                    regression_task=regression_task,
+                    classification_task=classification_task,
+                )
+            if torch.isnan(current_loss):
+                continue
+            loss_sum += float(current_loss.detach().cpu().item())
+            count += 1
+    finally:
+        if initial_pointer is not None:
+            val_prior.pointer = initial_pointer
     if count == 0:
         return float("nan")
     return loss_sum / count
@@ -135,6 +191,8 @@ def train(
     eval_every_epochs: int = 1,
     max_train_seconds: int | None = None,
     weight_decay: float = 0.0,
+    use_amp: bool = False,
+    amp_dtype: torch.dtype = torch.float16,
 ):
     """
     Trains our model on the given prior using the given
@@ -172,6 +230,8 @@ def train(
         callbacks = []
     if not device:
         device = get_default_device()
+    if not isinstance(device, torch.device):
+        device = torch.device(device)
     wrapped_model.to(device)
     optimizer = schedulefree.AdamWScheduleFree(
         wrapped_model.parameters(), lr=lr, weight_decay=weight_decay
@@ -180,6 +240,11 @@ def train(
         optimizer.load_state_dict(ckpt["optimizer"])
     classification_task = isinstance(criterion, nn.CrossEntropyLoss)
     regression_task = not classification_task
+    amp_enabled = bool(use_amp and device.type == "cuda")
+    scaler = torch.amp.GradScaler(
+        device="cuda",
+        enabled=amp_enabled and amp_dtype == torch.float16,
+    )
 
     assert prior.num_steps % accumulate_gradients == 0, (
         "num_steps must be divisible by accumulate_gradients"
@@ -201,6 +266,9 @@ def train(
     metric_name = str(es_cfg.get("metric", "val_loss"))
     min_delta = float(es_cfg.get("min_delta", 1e-4))
     patience = int(es_cfg.get("patience", 10))
+    min_epochs_before_stop = int(es_cfg.get("min_epochs_before_stop", 1))
+    if min_epochs_before_stop < 1:
+        raise ValueError("min_epochs_before_stop must be >= 1.")
     early_stopping_enabled = bool(es_cfg)
 
     try:
@@ -213,26 +281,44 @@ def train(
                 enumerate(prior), total=len(prior), desc=f"Epoch {epoch}", leave=False
             )
             for i, full_data in pbar:
-                x_train = full_data["x"].to(device)
-                y_train = full_data["y"].to(device)
+                x_train = full_data["x"]
+                y_train = full_data["y"]
                 if torch.isnan(x_train).any() or torch.isnan(y_train).any():
                     continue
-                loss = _compute_loss(
-                    wrapped_model=wrapped_model,
-                    criterion=criterion,
-                    full_data=full_data,
-                    device=device,
-                    regression_task=regression_task,
-                    classification_task=classification_task,
+                autocast_ctx = (
+                    torch.autocast(
+                        device_type=device.type,
+                        dtype=amp_dtype,
+                    )
+                    if amp_enabled
+                    else nullcontext()
                 )
+                with autocast_ctx:
+                    loss = _compute_loss(
+                        wrapped_model=wrapped_model,
+                        criterion=criterion,
+                        full_data=full_data,
+                        device=device,
+                        regression_task=regression_task,
+                        classification_task=classification_task,
+                    )
                 loss = loss / accumulate_gradients
-                loss.backward()
+                if scaler.is_enabled():
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
                 total_loss += loss.cpu().detach().item() * accumulate_gradients
                 pbar.set_postfix({"loss": f"{total_loss / (i + 1):.4f}"})
 
                 if (i + 1) % accumulate_gradients == 0:
+                    if scaler.is_enabled():
+                        scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(wrapped_model.parameters(), 1.0)
-                    optimizer.step()
+                    if scaler.is_enabled():
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        optimizer.step()
                     optimizer.zero_grad()
 
             end_time = time.time()
@@ -252,6 +338,8 @@ def train(
                     device=device,
                     regression_task=regression_task,
                     classification_task=classification_task,
+                    amp_enabled=amp_enabled,
+                    amp_dtype=amp_dtype,
                 )
                 metrics["val_loss"] = float(val_loss)
                 metrics["val_rmse"] = (
@@ -293,6 +381,7 @@ def train(
                     "metric": metric_name,
                     "patience": patience,
                     "min_delta": min_delta,
+                    "min_epochs_before_stop": min_epochs_before_stop,
                     "patience_counter": int(patience_counter),
                 },
             }
@@ -334,6 +423,7 @@ def train(
             if (
                 early_stopping_enabled
                 and evaluated_this_epoch
+                and epoch >= min_epochs_before_stop
                 and patience_counter >= patience
             ):
                 stopped_early = True

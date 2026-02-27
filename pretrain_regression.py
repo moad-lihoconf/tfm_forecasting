@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import json
+import math
 import shutil
 import tempfile
 from pathlib import Path
+from typing import cast
 
 import h5py
 import torch
@@ -16,6 +19,7 @@ from tfmplayground.gcs_utils import is_gcs_uri, path_for_read, upload_local_file
 from tfmplayground.interface import NanoTabPFNRegressor
 from tfmplayground.model import NanoTabPFNModel
 from tfmplayground.priors import PriorDumpDataLoader
+from tfmplayground.priors.audit import audit_prior_dump, integrity_errors
 from tfmplayground.train import train
 from tfmplayground.utils import (
     get_default_device,
@@ -132,6 +136,33 @@ def _build_parser() -> argparse.ArgumentParser:
         help="run validation every N epochs",
     )
     parser.add_argument(
+        "--val_steps",
+        type=str,
+        default="auto_full",
+        help=(
+            "validation steps per evaluation. Use 'auto_full' to cover the full "
+            "validation partition once per evaluation."
+        ),
+    )
+    parser.add_argument(
+        "--openml_eval_every_epochs",
+        type=int,
+        default=0,
+        help=(
+            "run OpenML toy regression evaluation every N epochs. "
+            "Set to 0 to disable in-training OpenML evaluation."
+        ),
+    )
+    parser.add_argument(
+        "--strict_prior_integrity",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "fail fast when prior integrity audit detects legacy or misaligned "
+            "padding metadata."
+        ),
+    )
+    parser.add_argument(
         "--save_best_weights",
         type=str,
         default=None,
@@ -154,6 +185,19 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.1,
         help="dropout rate for transformer and decoder blocks",
+    )
+    parser.add_argument(
+        "--amp",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="enable CUDA mixed precision training when a CUDA device is available",
+    )
+    parser.add_argument(
+        "--amp_dtype",
+        type=str,
+        default="float16",
+        choices=["float16", "bfloat16"],
+        help="mixed precision dtype to use when --amp is enabled on CUDA",
     )
     parser.add_argument(
         "--runname",
@@ -189,6 +233,34 @@ def _upload_checkpoint_if_present(local_path: Path, gcs_uri: str) -> None:
         upload_local_file_to_gcs(local_path, gcs_uri)
 
 
+def _resolve_val_steps(raw_value: str, *, val_count: int, batch_size: int) -> int:
+    normalized = raw_value.strip().lower()
+    if normalized == "auto_full":
+        return max(1, math.ceil(val_count / batch_size))
+    try:
+        parsed = int(normalized)
+    except ValueError as exc:
+        raise ValueError(
+            "--val_steps must be an integer >= 1 or the string 'auto_full'."
+        ) from exc
+    if parsed < 1:
+        raise ValueError("--val_steps must be >= 1.")
+    return parsed
+
+
+def _resolve_amp_dtype(raw_value: str) -> torch.dtype:
+    normalized = raw_value.strip().lower()
+    if normalized == "float16":
+        return torch.float16
+    if normalized == "bfloat16":
+        return torch.bfloat16
+    raise ValueError("--amp_dtype must be one of: float16, bfloat16.")
+
+
+def _audit_float(audit: dict[str, object], key: str) -> float:
+    return float(cast(float | int, audit[key]))
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -205,20 +277,79 @@ def main(argv: list[str] | None = None) -> None:
     try:
         local_priordump = path_for_read(args.priordump)
 
-        device = get_default_device()
+        device = torch.device(get_default_device())
         ckpt = None
         if args.loadcheckpoint:
             ckpt_path = path_for_read(args.loadcheckpoint)
             ckpt = torch.load(ckpt_path)
+        amp_dtype = _resolve_amp_dtype(args.amp_dtype)
+        use_amp = bool(args.amp and device.type == "cuda")
+        print(
+            f"Mixed precision {'enabled' if use_amp else 'disabled'}"
+            + (
+                f" (dtype={args.amp_dtype})"
+                if use_amp
+                else f" (requested={args.amp}, device={device.type})"
+            ),
+            flush=True,
+        )
 
         if not 0.0 < args.val_split < 1.0:
             raise ValueError("--val_split must be in (0, 1).")
         if args.eval_every_epochs < 1:
             raise ValueError("--eval_every_epochs must be >= 1.")
+        if args.openml_eval_every_epochs < 0:
+            raise ValueError("--openml_eval_every_epochs must be >= 0.")
         if args.early_stopping_patience < 1:
             raise ValueError("--early_stopping_patience must be >= 1.")
         if args.dropout < 0.0 or args.dropout >= 1.0:
             raise ValueError("--dropout must be in [0, 1).")
+
+        prior_audit = audit_prior_dump(local_priordump, sample_limit=4096)
+        audit_failures = integrity_errors(prior_audit)
+        feature_truncation_fraction = float(
+            cast(
+                float | int,
+                prior_audit.get("feature_truncation_fraction", float("nan")),
+            )
+        )
+        audit_summary = {
+            "has_num_datapoints_dataset": bool(
+                prior_audit["has_num_datapoints_dataset"]
+            ),
+            "has_variant_family_metadata": bool(
+                prior_audit.get("has_variant_family_metadata", False)
+            ),
+            "inferred_padded_target_fraction": _audit_float(
+                prior_audit,
+                "inferred_padded_target_fraction",
+            ),
+            "inferred_num_datapoints_mismatch_fraction": _audit_float(
+                prior_audit,
+                "inferred_num_datapoints_mismatch_fraction",
+            ),
+            "feature_budget_saturation_fraction": _audit_float(
+                prior_audit,
+                "feature_budget_saturation_fraction",
+            ),
+            "feature_truncation_fraction": feature_truncation_fraction,
+            "train_y_std_mean": _audit_float(prior_audit, "train_y_std_mean"),
+            "target_y_std_mean": _audit_float(prior_audit, "target_y_std_mean"),
+            "family_entropies": prior_audit.get("family_entropies", {}),
+        }
+        print(
+            f"Prior audit summary: {json.dumps(audit_summary, sort_keys=True)}",
+            flush=True,
+        )
+        if audit_failures:
+            details = "\n".join(f"- {issue}" for issue in audit_failures)
+            message = f"Prior integrity audit failed:\n{details}"
+            if args.strict_prior_integrity:
+                raise ValueError(message)
+            print(
+                f"WARNING: {message}",
+                flush=True,
+            )
 
         with h5py.File(local_priordump, "r") as f:
             total_functions = int(f["X"].shape[0])
@@ -245,7 +376,13 @@ def main(argv: list[str] | None = None) -> None:
                 f"batchsize={args.batchsize}"
             )
 
-        train_start = args.steps * (ckpt["epoch"] if ckpt else 0)
+        resumed_epoch = int(ckpt["epoch"]) if ckpt else 0
+        train_start = args.steps * args.batchsize * resumed_epoch
+        val_steps = _resolve_val_steps(
+            args.val_steps,
+            val_count=len(val_indices),
+            batch_size=args.batchsize,
+        )
         prior = PriorDumpDataLoader(
             filename=local_priordump,
             num_steps=args.steps,
@@ -256,7 +393,7 @@ def main(argv: list[str] | None = None) -> None:
         )
         val_prior = PriorDumpDataLoader(
             filename=local_priordump,
-            num_steps=max(1, args.steps // 4),
+            num_steps=val_steps,
             batch_size=args.batchsize,
             device=device,
             starting_index=0,
@@ -280,6 +417,7 @@ def main(argv: list[str] | None = None) -> None:
             filename=local_priordump,
             n_buckets=args.n_buckets,
             device=device,
+            indices=train_indices,
         )
 
         local_savebuckets, gcs_savebuckets = _prepare_output_path(
@@ -296,8 +434,9 @@ def main(argv: list[str] | None = None) -> None:
         dist = FullSupportBarDistribution(bucket_edges)
 
         class EvaluationLoggerCallback(ConsoleLoggerCallback):
-            def __init__(self, tasks):
+            def __init__(self, tasks: list[int], every_epochs: int):
                 self.tasks = tasks
+                self.every_epochs = every_epochs
 
             def on_epoch_end(
                 self,
@@ -307,11 +446,15 @@ def main(argv: list[str] | None = None) -> None:
                 model,
                 **kwargs,
             ):
+                if self.every_epochs <= 0 or epoch % self.every_epochs != 0:
+                    return
                 regressor = NanoTabPFNRegressor(model, dist, device)
                 predictions = get_openml_predictions(model=regressor, tasks=self.tasks)
                 scores = []
                 for _dataset_name, (y_true, y_pred, _) in predictions.items():
                     scores.append(r2_score(y_true, y_pred))
+                if not scores:
+                    return
                 avg_score = sum(scores) / len(scores)
                 print(
                     f"epoch {epoch:5d} | time {epoch_time:5.2f}s"
@@ -320,7 +463,20 @@ def main(argv: list[str] | None = None) -> None:
                     flush=True,
                 )
 
-        callbacks = [EvaluationLoggerCallback(TOY_TASKS_REGRESSION)]
+        callbacks: list[ConsoleLoggerCallback] = []
+        if args.openml_eval_every_epochs > 0:
+            callbacks.append(
+                EvaluationLoggerCallback(
+                    TOY_TASKS_REGRESSION,
+                    every_epochs=args.openml_eval_every_epochs,
+                )
+            )
+
+        effective_samples_per_epoch = max(1, args.steps * args.batchsize)
+        min_epochs_before_stop = max(
+            1,
+            math.ceil(len(train_indices) / effective_samples_per_epoch),
+        )
 
         trained_model, train_info = train(
             model=model,
@@ -343,9 +499,12 @@ def main(argv: list[str] | None = None) -> None:
                 "metric": args.early_stopping_metric,
                 "patience": args.early_stopping_patience,
                 "min_delta": args.early_stopping_min_delta,
+                "min_epochs_before_stop": min_epochs_before_stop,
             },
             weight_decay=args.weight_decay,
             run_name=args.runname,
+            use_amp=use_amp,
+            amp_dtype=amp_dtype,
         )
 
         trained_model = trained_model.to("cpu")
@@ -365,7 +524,9 @@ def main(argv: list[str] | None = None) -> None:
                 "train_count": len(train_indices),
                 "val_count": len(val_indices),
                 "val_split": args.val_split,
+                "val_steps": val_steps,
             },
+            "prior_audit": prior_audit,
         }
 
         local_saveweights, gcs_saveweights = _prepare_output_path(

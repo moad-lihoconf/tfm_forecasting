@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING
 
 import h5py
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
@@ -95,12 +96,16 @@ class PriorDumpDataLoader(DataLoader):
         self.batch_size = batch_size
         with h5py.File(self.filename, "r") as f:
             self.total_num_functions = int(f["X"].shape[0])
-            self.num_datapoints_max = self.total_num_functions
+            self.num_datapoints_max = int(f["X"].shape[1])
             if "max_num_classes" in f:
                 self.max_num_classes = f["max_num_classes"][0]
             else:
                 self.max_num_classes = None
-            self.problem_type = f["problem_type"][()].decode("utf-8")
+            problem_type_raw = f["problem_type"][()]
+            if isinstance(problem_type_raw, bytes):
+                self.problem_type = problem_type_raw.decode("utf-8")
+            else:
+                self.problem_type = str(problem_type_raw)
             self.has_num_datapoints = "num_datapoints" in f
             self.stored_max_seq_len = f["X"].shape[1]
         self.device = device
@@ -138,23 +143,45 @@ class PriorDumpDataLoader(DataLoader):
                     num_datapoints_batch = f["num_datapoints"][sorted_idx]
                     max_seq_in_batch = int(num_datapoints_batch.max())
                 else:
+                    num_datapoints_batch = np.full(
+                        sorted_idx.shape[0], self.stored_max_seq_len, dtype=np.int32
+                    )
                     max_seq_in_batch = int(self.stored_max_seq_len)
 
                 x_np = f["X"][sorted_idx, :max_seq_in_batch, :num_features][
                     inverse_order
                 ]
                 y_np = f["y"][sorted_idx, :max_seq_in_batch][inverse_order]
+                num_datapoints_np = np.asarray(
+                    num_datapoints_batch[inverse_order], dtype=np.int64
+                )
                 single_eval_pos = f["single_eval_pos"][sorted_idx][inverse_order]
                 x = torch.from_numpy(x_np)
                 y = torch.from_numpy(y_np)
                 single_eval_pos_tensor = torch.as_tensor(
                     single_eval_pos, dtype=torch.long, device=self.device
                 )
+                num_datapoints_tensor = torch.as_tensor(
+                    num_datapoints_np,
+                    dtype=torch.long,
+                    device=self.device,
+                )
+                positions = torch.arange(
+                    max_seq_in_batch, device=self.device
+                ).unsqueeze(0)
+                target_mask = (positions >= single_eval_pos_tensor.unsqueeze(1)) & (
+                    positions < num_datapoints_tensor.unsqueeze(1)
+                )
                 single_eval_pos_value: int | torch.Tensor
                 if torch.all(single_eval_pos_tensor == single_eval_pos_tensor[0]):
                     single_eval_pos_value = int(single_eval_pos_tensor[0].item())
                 else:
                     single_eval_pos_value = single_eval_pos_tensor
+                num_datapoints_value: int | torch.Tensor
+                if torch.all(num_datapoints_tensor == num_datapoints_tensor[0]):
+                    num_datapoints_value = int(num_datapoints_tensor[0].item())
+                else:
+                    num_datapoints_value = num_datapoints_tensor
 
                 yield dict(
                     x=x.to(self.device),
@@ -163,6 +190,8 @@ class PriorDumpDataLoader(DataLoader):
                         self.device
                     ),  # target_y is identical to y (for downstream compatibility)
                     single_eval_pos=single_eval_pos_value,
+                    num_datapoints=num_datapoints_value,
+                    target_mask=target_mask.to(torch.bool),
                 )
 
     def __len__(self):
@@ -229,7 +258,11 @@ class TabICLPriorDataLoader(DataLoader):
         # Should match in practice for batch_size_per_gp=batch_size.
         active_features = active_features[0].item()
         x = x[:, :, :active_features]
-        single_eval_pos = train_size[0].item()
+        single_eval_pos = int(train_size[0].item())
+        num_datapoints = int(y.shape[1])
+        positions = torch.arange(num_datapoints, device=self.device).unsqueeze(0)
+        target_mask = positions >= single_eval_pos
+        target_mask = target_mask.expand(int(y.shape[0]), -1).clone()
         return dict(
             x=x.to(self.device),
             y=y.to(self.device),
@@ -237,6 +270,8 @@ class TabICLPriorDataLoader(DataLoader):
                 self.device
             ),  # target_y is identical to y (for downstream compatibility)
             single_eval_pos=single_eval_pos,
+            num_datapoints=num_datapoints,
+            target_mask=target_mask.to(torch.bool),
         )
 
     def __iter__(self):
@@ -338,6 +373,24 @@ class TICLPriorDataLoader(DataLoader):
         x = x.permute(1, 0, 2)
         y = y.permute(1, 0)
         target_y = target_y.permute(1, 0)
+        num_datapoints = int(y.shape[1])
+        if torch.is_tensor(single_eval_pos):
+            sep_tensor = single_eval_pos.to(dtype=torch.long, device=self.device)
+            if sep_tensor.ndim == 0:
+                sep_tensor = sep_tensor.repeat(y.shape[0])
+        else:
+            sep_tensor = torch.full(
+                (y.shape[0],),
+                int(single_eval_pos),
+                dtype=torch.long,
+                device=self.device,
+            )
+        positions = torch.arange(num_datapoints, device=self.device).unsqueeze(0)
+        target_mask = positions >= sep_tensor.unsqueeze(1)
+        if torch.all(sep_tensor == sep_tensor[0]):
+            single_eval_pos_value: int | torch.Tensor = int(sep_tensor[0].item())
+        else:
+            single_eval_pos_value = sep_tensor
 
         return dict(
             x=x.to(self.device),
@@ -345,7 +398,9 @@ class TICLPriorDataLoader(DataLoader):
             target_y=target_y.to(
                 self.device
             ),  # target_y is identical to y (for downstream compatibility)
-            single_eval_pos=single_eval_pos,
+            single_eval_pos=single_eval_pos_value,
+            num_datapoints=num_datapoints,
+            target_mask=target_mask.to(torch.bool),
         )
 
     def __iter__(self):

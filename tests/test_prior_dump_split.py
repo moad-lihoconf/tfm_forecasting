@@ -62,6 +62,10 @@ def test_prior_dump_train_val_split_indices_are_disjoint_and_deterministic(
     val_batch = next(iter(val_loader))
     assert isinstance(train_batch["single_eval_pos"], int)
     assert isinstance(val_batch["single_eval_pos"], int)
+    assert isinstance(train_batch["num_datapoints"], int)
+    assert isinstance(val_batch["num_datapoints"], int)
+    assert train_batch["target_mask"].dtype == torch.bool
+    assert val_batch["target_mask"].dtype == torch.bool
     train_ids = set(torch.unique(train_batch["x"]).to(torch.int64).tolist())
     val_ids = set(torch.unique(val_batch["x"]).to(torch.int64).tolist())
     assert train_ids.isdisjoint(val_ids)
@@ -94,3 +98,10 @@ def test_prior_dump_loader_preserves_per_row_single_eval_pos(tmp_path: Path):
     assert torch.is_tensor(batch["single_eval_pos"])
     assert batch["single_eval_pos"].dtype == torch.long
     assert batch["single_eval_pos"].tolist() == [2, 4]
+    assert isinstance(batch["num_datapoints"], int)
+    assert batch["num_datapoints"] == 6
+    assert batch["target_mask"].dtype == torch.bool
+    assert batch["target_mask"].tolist() == [
+        [False, False, True, True, True, True],
+        [False, False, False, False, True, True],
+    ]
