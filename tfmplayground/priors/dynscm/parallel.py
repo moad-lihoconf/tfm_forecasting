@@ -13,7 +13,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - optional dependency.
     threadpool_limits = None
 
-from .config import DynSCMConfig
+from .config import DynSCMConfig, sample_dynscm_variant_cfg
 from .features import build_forecasting_table, sample_origins_and_horizons
 from .graph import sample_regime_graphs
 from .mechanisms import sample_regime_mechanisms
@@ -58,7 +58,7 @@ def init_dynscm_worker(
 
 def generate_dynscm_worker_sample(
     task: DynSCMWorkerTask,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, dict[str, int | float | str]]:
     """Generate one sample using worker-local config and task parameters."""
     if _WORKER_CFG is None:
         raise RuntimeError("DynSCM worker was not initialized with config state.")
@@ -152,10 +152,11 @@ def build_single_dynscm_sample(
     n_test: int,
     row_budget: int,
     num_features: int,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, dict[str, int | float | str]]:
     """Generate exactly one padded DynSCM `(x_i, y_i)` sample."""
     sample_rng = cfg.make_rng(sample_seed)
-    num_vars, num_steps, y_idx = sample_dataset_dimensions(cfg, sample_rng)
+    variant_cfg, variant_metadata = sample_dynscm_variant_cfg(cfg, sample_rng)
+    num_vars, num_steps, y_idx = sample_dataset_dimensions(variant_cfg, sample_rng)
     per_sample_seeds = sample_rng.integers(
         0,
         _SEED_MAX,
@@ -164,17 +165,17 @@ def build_single_dynscm_sample(
     )
 
     graph_sample = sample_regime_graphs(
-        cfg,
+        variant_cfg,
         num_vars=num_vars,
         seed=int(per_sample_seeds[0]),
     )
     mechanism_sample = sample_regime_mechanisms(
-        cfg,
+        variant_cfg,
         graph_sample,
         seed=int(per_sample_seeds[1]),
     )
     simulation_sample = simulate_dynscm_series(
-        cfg,
+        variant_cfg,
         graph_sample,
         mechanism_sample,
         num_steps=num_steps,
@@ -185,7 +186,7 @@ def build_single_dynscm_sample(
     y_index = np.array([y_idx], dtype=np.int64)
 
     t_idx, h_idx = sample_origins_and_horizons(
-        cfg,
+        variant_cfg,
         batch_size=1,
         num_steps=num_steps,
         n_train=n_train,
@@ -193,7 +194,7 @@ def build_single_dynscm_sample(
         seed=int(per_sample_seeds[3]),
     )
     obs_mask = sample_observation_mask(
-        cfg,
+        variant_cfg,
         series,
         seed=int(per_sample_seeds[4]),
         label_times=t_idx + h_idx,
@@ -201,7 +202,7 @@ def build_single_dynscm_sample(
     )
 
     x_raw, y_raw, metadata = build_forecasting_table(
-        cfg,
+        variant_cfg,
         series,
         y_index,
         n_train=n_train,
@@ -220,9 +221,19 @@ def build_single_dynscm_sample(
     x_padded = pad_rows_3d(x_budgeted, row_budget=row_budget)
     y_padded = pad_rows_2d(y_raw, row_budget=row_budget)
 
+    sample_metadata = {
+        **variant_metadata,
+        "sampled_num_vars": int(num_vars),
+        "sampled_num_steps": int(num_steps),
+        "sampled_n_train": int(n_train),
+        "sampled_n_test": int(n_test),
+        "sampled_pre_budget_feature_count": int(x_prioritized.shape[2]),
+    }
+
     return (
         x_padded[0].astype(np.float32, copy=False),
         y_padded[0].astype(np.float32, copy=False),
+        sample_metadata,
     )
 
 

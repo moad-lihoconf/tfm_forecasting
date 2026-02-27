@@ -63,12 +63,37 @@ def test_dynscm_prior_dataloader_contract_and_root_exports(priors_modules):
     )
 
     batch = next(iter(prior))
-    assert set(batch) == {"x", "y", "target_y", "single_eval_pos"}
+    assert {
+        "x",
+        "y",
+        "target_y",
+        "single_eval_pos",
+        "num_datapoints",
+        "target_mask",
+    }.issubset(set(batch))
+    assert {
+        "sampled_mechanism_type_id",
+        "sampled_noise_family_id",
+        "sampled_missing_mode_id",
+        "sampled_kernel_family_id",
+        "sampled_num_vars",
+    }.issubset(set(batch))
     assert batch["x"].shape == (2, 12, 16)
     assert batch["y"].shape == (2, 12)
     assert batch["target_y"].shape == (2, 12)
     assert isinstance(batch["single_eval_pos"], int)
+    assert isinstance(batch["num_datapoints"], int)
     assert 0 < batch["single_eval_pos"] < 12
+    assert batch["single_eval_pos"] < batch["num_datapoints"] <= 12
+    assert batch["target_mask"].shape == (2, 12)
+    assert torch.all(batch["target_mask"][:, : batch["single_eval_pos"]] == 0)
+    assert torch.all(
+        batch["target_mask"][
+            :,
+            batch["single_eval_pos"] : batch["num_datapoints"],
+        ]
+        == 1
+    )
     assert torch.isfinite(batch["x"]).all()
     assert torch.isfinite(batch["y"]).all()
     assert torch.equal(batch["y"], batch["target_y"])
@@ -76,6 +101,8 @@ def test_dynscm_prior_dataloader_contract_and_root_exports(priors_modules):
     assert hasattr(root_mod, "DynSCMPriorDataLoader")
     assert hasattr(root_mod, "DynSCMConfig")
     assert hasattr(root_mod, "make_get_batch_dynscm")
+    assert hasattr(root_mod, "sample_dynscm_variant_cfg")
+    assert hasattr(root_mod, "dynscm_family_id_mappings")
 
 
 def test_dynscm_override_parser_validates_inputs(priors_modules):

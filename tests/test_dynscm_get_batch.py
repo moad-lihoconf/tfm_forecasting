@@ -6,6 +6,27 @@ import numpy as np
 import pytest
 import torch
 
+_REQUIRED_BATCH_KEYS = {
+    "x",
+    "y",
+    "target_y",
+    "single_eval_pos",
+    "num_datapoints",
+    "target_mask",
+}
+_RICHNESS_METADATA_KEYS = {
+    "sampled_mechanism_type_id",
+    "sampled_noise_family_id",
+    "sampled_missing_mode_id",
+    "sampled_kernel_family_id",
+    "sampled_student_df",
+    "sampled_num_vars",
+    "sampled_num_steps",
+    "sampled_n_train",
+    "sampled_n_test",
+    "sampled_pre_budget_feature_count",
+}
+
 
 def _close_if_supported(get_batch) -> None:
     close_fn = getattr(get_batch, "close", None)
@@ -45,17 +66,26 @@ def test_make_get_batch_dynscm_contract_shapes_and_padding(dynscm_api):
 
     batch = get_batch(batch_size=3, num_datapoints_max=9, num_features=12)
 
-    assert set(batch) == {"x", "y", "target_y", "single_eval_pos"}
+    assert _REQUIRED_BATCH_KEYS.issubset(set(batch))
+    assert _RICHNESS_METADATA_KEYS.issubset(set(batch))
     assert isinstance(batch["single_eval_pos"], int)
+    assert isinstance(batch["num_datapoints"], int)
 
     x = batch["x"]
     y = batch["y"]
     target_y = batch["target_y"]
+    target_mask = batch["target_mask"]
 
     assert x.shape == (3, 9, 12)
     assert y.shape == (3, 9)
     assert target_y.shape == (3, 9)
     assert batch["single_eval_pos"] == 4
+    assert batch["num_datapoints"] == 6
+    assert target_mask.shape == (3, 9)
+    assert target_mask.dtype == torch.bool
+    assert torch.all(target_mask[:, :4] == 0)
+    assert torch.all(target_mask[:, 4:6] == 1)
+    assert torch.all(target_mask[:, 6:] == 0)
 
     assert torch.equal(y, target_y)
     assert torch.isfinite(x).all()
@@ -104,10 +134,18 @@ def test_make_get_batch_dynscm_is_deterministic_across_closures(dynscm_api):
     assert torch.equal(batch_a_1["x"], batch_b_1["x"])
     assert torch.equal(batch_a_1["y"], batch_b_1["y"])
     assert batch_a_1["single_eval_pos"] == batch_b_1["single_eval_pos"]
+    assert batch_a_1["num_datapoints"] == batch_b_1["num_datapoints"]
+    assert torch.equal(batch_a_1["target_mask"], batch_b_1["target_mask"])
+    for key in _RICHNESS_METADATA_KEYS:
+        assert torch.equal(batch_a_1[key], batch_b_1[key])
 
     assert torch.equal(batch_a_2["x"], batch_b_2["x"])
     assert torch.equal(batch_a_2["y"], batch_b_2["y"])
     assert batch_a_2["single_eval_pos"] == batch_b_2["single_eval_pos"]
+    assert batch_a_2["num_datapoints"] == batch_b_2["num_datapoints"]
+    assert torch.equal(batch_a_2["target_mask"], batch_b_2["target_mask"])
+    for key in _RICHNESS_METADATA_KEYS:
+        assert torch.equal(batch_a_2[key], batch_b_2[key])
 
     _close_if_supported(get_batch_a)
     _close_if_supported(get_batch_b)
@@ -158,10 +196,18 @@ def test_make_get_batch_dynscm_parallel_matches_serial(dynscm_api):
     assert torch.equal(serial_1["x"], parallel_1["x"])
     assert torch.equal(serial_1["y"], parallel_1["y"])
     assert serial_1["single_eval_pos"] == parallel_1["single_eval_pos"]
+    assert serial_1["num_datapoints"] == parallel_1["num_datapoints"]
+    assert torch.equal(serial_1["target_mask"], parallel_1["target_mask"])
+    for key in _RICHNESS_METADATA_KEYS:
+        assert torch.equal(serial_1[key], parallel_1[key])
 
     assert torch.equal(serial_2["x"], parallel_2["x"])
     assert torch.equal(serial_2["y"], parallel_2["y"])
     assert serial_2["single_eval_pos"] == parallel_2["single_eval_pos"]
+    assert serial_2["num_datapoints"] == parallel_2["num_datapoints"]
+    assert torch.equal(serial_2["target_mask"], parallel_2["target_mask"])
+    for key in _RICHNESS_METADATA_KEYS:
+        assert torch.equal(serial_2[key], parallel_2[key])
 
 
 def test_feature_priority_truncation_order_is_deterministic(dynscm_api):
@@ -292,10 +338,18 @@ def test_get_batch_scenario_matrix(
     x = batch["x"]
     y = batch["y"]
     split = int(batch["single_eval_pos"])
+    num_datapoints = int(batch["num_datapoints"])
+    mask = batch["target_mask"]
 
     assert x.shape == (2, 16, 24)
     assert y.shape == (2, 16)
     assert 0 < split < 16
+    assert split < num_datapoints <= 16
+    assert mask.shape == (2, 16)
+    assert _RICHNESS_METADATA_KEYS.issubset(set(batch))
+    assert torch.all(mask[:, :split] == 0)
+    assert torch.all(mask[:, split:num_datapoints] == 1)
+    assert torch.all(mask[:, num_datapoints:] == 0)
     assert torch.isfinite(x).all()
     assert torch.isfinite(y).all()
     assert not torch.isnan(x).any()

@@ -1,6 +1,6 @@
 """DynSCM prior: dynamic structural causal model sampling and simulation."""
 
-from .config import DynSCMConfig
+from .config import DynSCMConfig, dynscm_family_id_mappings, sample_dynscm_variant_cfg
 from .features import (
     build_forecasting_table,
     extract_feature_block,
@@ -53,6 +53,8 @@ __all__ = [
     "sample_regime_path",
     "sample_regime_mechanisms",
     "sample_regime_graphs",
+    "sample_dynscm_variant_cfg",
     "sample_stable_coefficients",
     "simulate_dynscm_series",
+    "dynscm_family_id_mappings",
 ]

@@ -83,10 +83,11 @@ class DynSCMBatchGenerator:
             dtype=np.float32,
         )
         y_batch = np.empty((batch_size, num_datapoints_max), dtype=np.float32)
+        sample_metadata: dict[str, list[int | float]] = {}
 
         if self.workers == 1:
             for idx, sample_seed in enumerate(sample_seeds):
-                x_i, y_i = build_single_dynscm_sample(
+                x_i, y_i, metadata_i = build_single_dynscm_sample(
                     self.cfg,
                     sample_seed=int(sample_seed),
                     n_train=n_train,
@@ -96,6 +97,7 @@ class DynSCMBatchGenerator:
                 )
                 x_batch[idx] = x_i
                 y_batch[idx] = y_i
+                _accumulate_numeric_metadata(sample_metadata, metadata_i)
         else:
             tasks = [
                 DynSCMWorkerTask(
@@ -108,7 +110,7 @@ class DynSCMBatchGenerator:
                 for sample_seed in sample_seeds
             ]
             try:
-                for idx, (x_i, y_i) in enumerate(
+                for idx, (x_i, y_i, metadata_i) in enumerate(
                     self._get_executor().map(
                         generate_dynscm_worker_sample,
                         tasks,
@@ -117,6 +119,7 @@ class DynSCMBatchGenerator:
                 ):
                     x_batch[idx] = x_i
                     y_batch[idx] = y_i
+                    _accumulate_numeric_metadata(sample_metadata, metadata_i)
             except Exception as exc:
                 raise RuntimeError("DynSCM parallel batch generation failed.") from exc
 
@@ -129,13 +132,36 @@ class DynSCMBatchGenerator:
 
         x_tensor = torch.from_numpy(x_batch).to(self.target_device)
         y_tensor = torch.from_numpy(y_batch).to(self.target_device)
+        row_positions = torch.arange(num_datapoints_max, device=self.target_device)
+        target_mask = (row_positions >= int(n_train)) & (
+            row_positions < int(n_train + n_test)
+        )
+        target_mask = target_mask.unsqueeze(0).expand(batch_size, -1).clone()
 
-        return {
+        batch_payload: dict[str, torch.Tensor | int] = {
             "x": x_tensor,
             "y": y_tensor,
             "target_y": y_tensor.clone(),
             "single_eval_pos": int(n_train),
+            "num_datapoints": int(n_train + n_test),
+            "target_mask": target_mask,
         }
+        for key, values in sample_metadata.items():
+            if len(values) != batch_size:
+                raise RuntimeError(
+                    f"Metadata field {key!r} length mismatch: "
+                    f"{len(values)} != batch_size={batch_size}"
+                )
+            values_arr = np.asarray(values)
+            if np.issubdtype(values_arr.dtype, np.integer):
+                batch_payload[key] = torch.from_numpy(values_arr.astype(np.int64)).to(
+                    self.target_device
+                )
+            elif np.issubdtype(values_arr.dtype, np.floating):
+                batch_payload[key] = torch.from_numpy(values_arr.astype(np.float32)).to(
+                    self.target_device
+                )
+        return batch_payload
 
     def _get_executor(self) -> ProcessPoolExecutor:
         if self._executor is not None:
@@ -242,3 +268,18 @@ def _pad_rows_2d(y: np.ndarray, *, row_budget: int) -> np.ndarray:
 
 def _draw_seed(rng: np.random.Generator) -> int:
     return int(draw_seed_bundles(rng, batch_size=1, bundle_width=1)[0, 0])
+
+
+def _accumulate_numeric_metadata(
+    accum: dict[str, list[int | float]],
+    metadata: Mapping[str, int | float | str],
+) -> None:
+    for key, value in metadata.items():
+        if isinstance(value, bool):
+            accum.setdefault(key, []).append(int(value))
+            continue
+        if isinstance(value, int | np.integer):
+            accum.setdefault(key, []).append(int(value))
+            continue
+        if isinstance(value, float | np.floating):
+            accum.setdefault(key, []).append(float(value))

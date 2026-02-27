@@ -21,6 +21,64 @@ class _FrozenConfigModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+_MECHANISM_FAMILIES = ("linear_var", "linear_plus_residual")
+_NOISE_FAMILIES = ("normal", "student_t")
+_MISSING_MODES = ("off", "mcar", "mar", "mnar_lite", "mix")
+_KERNEL_FAMILIES = ("exp_decay", "power_law", "mix")
+
+
+def _validate_choice_distribution(
+    *,
+    label: str,
+    choices: tuple[str, ...] | None,
+    probs: tuple[float, ...] | None,
+) -> list[str]:
+    errors: list[str] = []
+    if choices is None and probs is None:
+        return errors
+    if choices is None or probs is None:
+        errors.append(
+            f"{label}_choices and {label}_probs must both be provided or both omitted."
+        )
+        return errors
+    if not choices:
+        errors.append(f"{label}_choices must be non-empty when provided.")
+        return errors
+    if len(choices) != len(probs):
+        errors.append(f"{label}_choices and {label}_probs must have identical lengths.")
+    if len(set(choices)) != len(choices):
+        errors.append(f"{label}_choices must not contain duplicates.")
+
+    probs_arr = np.asarray(probs, dtype=np.float64)
+    if probs_arr.ndim != 1:
+        errors.append(f"{label}_probs must be a 1D sequence.")
+        return errors
+    if not np.isfinite(probs_arr).all():
+        errors.append(f"{label}_probs must contain only finite values.")
+        return errors
+    if np.any(probs_arr <= 0.0):
+        errors.append(f"{label}_probs must contain strictly positive values.")
+        return errors
+    if float(probs_arr.sum()) <= 0.0:
+        errors.append(f"{label}_probs must sum to a positive value.")
+    return errors
+
+
+def _sample_from_distribution(
+    *,
+    default_value: str,
+    choices: tuple[str, ...] | None,
+    probs: tuple[float, ...] | None,
+    rng: np.random.Generator,
+) -> str:
+    if choices is None or probs is None:
+        return default_value
+    probs_arr = np.asarray(probs, dtype=np.float64)
+    probs_arr = probs_arr / probs_arr.sum()
+    sampled_idx = int(rng.choice(np.arange(len(choices), dtype=np.int64), p=probs_arr))
+    return str(choices[sampled_idx])
+
+
 class DynSCMShapeConfig(_FrozenConfigModel):
     """Shape knobs for sampled tasks."""
 
@@ -104,8 +162,27 @@ class DynSCMMechanismConfig(_FrozenConfigModel):
     mechanism_type: Literal["linear_var", "linear_plus_residual"] = (
         "linear_plus_residual"
     )
+    mechanism_type_choices: (
+        tuple[Literal["linear_var", "linear_plus_residual"], ...] | None
+    ) = None
+    mechanism_type_probs: tuple[float, ...] | None = None
     residual_num_features: int = Field(default=12, ge=0)
     residual_lipschitz_max: float = Field(default=0.10, ge=0.0)
+
+    @model_validator(mode="after")
+    def _cross_validate(self) -> DynSCMMechanismConfig:
+        issues = _validate_choice_distribution(
+            label="mechanism_type",
+            choices=(
+                None
+                if self.mechanism_type_choices is None
+                else tuple(str(v) for v in self.mechanism_type_choices)
+            ),
+            probs=self.mechanism_type_probs,
+        )
+        if issues:
+            raise ValueError("\n".join(issues))
+        return self
 
 
 class DynSCMStabilityConfig(_FrozenConfigModel):
@@ -130,7 +207,11 @@ class DynSCMNoiseConfig(_FrozenConfigModel):
     """Noise generation knobs."""
 
     noise_family: Literal["normal", "student_t"] = "student_t"
+    noise_family_choices: tuple[Literal["normal", "student_t"], ...] | None = None
+    noise_family_probs: tuple[float, ...] | None = None
     student_df: float = Field(default=5.0)
+    student_df_min: float | None = None
+    student_df_max: float | None = None
     noise_scale_min: float = Field(default=0.02, gt=0.0)
     noise_scale_max: float = Field(default=0.20)
 
@@ -141,6 +222,27 @@ class DynSCMNoiseConfig(_FrozenConfigModel):
             errors.append("noise_scale_max must be >= noise_scale_min.")
         if self.noise_family == "student_t" and self.student_df <= 2.0:
             errors.append("student_df must be > 2 for finite variance.")
+        if (self.student_df_min is None) != (self.student_df_max is None):
+            errors.append(
+                "student_df_min and student_df_max must both be provided "
+                "or both omitted."
+            )
+        if self.student_df_min is not None and self.student_df_max is not None:
+            if self.student_df_min <= 2.0:
+                errors.append("student_df_min must be > 2 for finite variance.")
+            if self.student_df_max < self.student_df_min:
+                errors.append("student_df_max must be >= student_df_min.")
+        errors.extend(
+            _validate_choice_distribution(
+                label="noise_family",
+                choices=(
+                    None
+                    if self.noise_family_choices is None
+                    else tuple(str(v) for v in self.noise_family_choices)
+                ),
+                probs=self.noise_family_probs,
+            )
+        )
         if errors:
             raise ValueError("\n".join(errors))
         return self
@@ -150,6 +252,10 @@ class DynSCMMissingnessConfig(_FrozenConfigModel):
     """Missingness and imputation knobs."""
 
     missing_mode: Literal["off", "mcar", "mar", "mnar_lite", "mix"] = "mix"
+    missing_mode_choices: (
+        tuple[Literal["off", "mcar", "mar", "mnar_lite", "mix"], ...] | None
+    ) = None
+    missing_mode_probs: tuple[float, ...] | None = None
     missing_rate_min: float = Field(default=0.0, ge=0.0, le=1.0)
     missing_rate_max: float = Field(default=0.25, ge=0.0, le=1.0)
     block_missing_prob: float = Field(default=0.25, ge=0.0, le=1.0)
@@ -165,6 +271,17 @@ class DynSCMMissingnessConfig(_FrozenConfigModel):
             errors.append("missing_rate_max must be >= missing_rate_min.")
         if self.block_len_max < self.block_len_min:
             errors.append("block_len_max must be >= block_len_min.")
+        errors.extend(
+            _validate_choice_distribution(
+                label="missing_mode",
+                choices=(
+                    None
+                    if self.missing_mode_choices is None
+                    else tuple(str(v) for v in self.missing_mode_choices)
+                ),
+                probs=self.missing_mode_probs,
+            )
+        )
         if errors:
             raise ValueError("\n".join(errors))
         return self
@@ -177,6 +294,10 @@ class DynSCMFeatureConfig(_FrozenConfigModel):
     explicit_lags: tuple[int, ...] = (0, 1, 2, 5, 10)
     num_kernels: int = Field(default=3, ge=0)
     kernel_family: Literal["exp_decay", "power_law", "mix"] = "mix"
+    kernel_family_choices: (
+        tuple[Literal["exp_decay", "power_law", "mix"], ...] | None
+    ) = None
+    kernel_family_probs: tuple[float, ...] | None = None
     add_time_feature: bool = True
     add_seasonality: bool = True
     season_period_choices: tuple[int, ...] = (7, 12, 24, 30)
@@ -205,6 +326,17 @@ class DynSCMFeatureConfig(_FrozenConfigModel):
                 )
             elif min(self.season_period_choices) <= 1:
                 errors.append("season_period_choices must contain integers > 1.")
+        errors.extend(
+            _validate_choice_distribution(
+                label="kernel_family",
+                choices=(
+                    None
+                    if self.kernel_family_choices is None
+                    else tuple(str(v) for v in self.kernel_family_choices)
+                ),
+                probs=self.kernel_family_probs,
+            )
+        )
         if errors:
             raise ValueError("\n".join(errors))
         return self
@@ -347,3 +479,92 @@ class DynSCMConfig(_FrozenConfigModel):
             return cls.model_validate_json(Path(path).read_bytes())
         except ValidationError as exc:
             raise ValueError(str(exc)) from exc
+
+
+def dynscm_family_id_mappings() -> dict[str, dict[int, str]]:
+    """Return stable numeric id mappings for sampled DynSCM family metadata."""
+    return {
+        "mechanism_type": {
+            idx: family for idx, family in enumerate(_MECHANISM_FAMILIES)
+        },
+        "noise_family": {idx: family for idx, family in enumerate(_NOISE_FAMILIES)},
+        "missing_mode": {idx: family for idx, family in enumerate(_MISSING_MODES)},
+        "kernel_family": {idx: family for idx, family in enumerate(_KERNEL_FAMILIES)},
+    }
+
+
+def sample_dynscm_variant_cfg(
+    base_cfg: DynSCMConfig,
+    rng: np.random.Generator,
+) -> tuple[DynSCMConfig, dict[str, int | float | str]]:
+    """Sample per-table DynSCM family variants while preserving base defaults."""
+    mechanism_type = _sample_from_distribution(
+        default_value=str(base_cfg.mechanism_type),
+        choices=(
+            None
+            if base_cfg.mechanism_type_choices is None
+            else tuple(str(v) for v in base_cfg.mechanism_type_choices)
+        ),
+        probs=base_cfg.mechanism_type_probs,
+        rng=rng,
+    )
+    noise_family = _sample_from_distribution(
+        default_value=str(base_cfg.noise_family),
+        choices=(
+            None
+            if base_cfg.noise_family_choices is None
+            else tuple(str(v) for v in base_cfg.noise_family_choices)
+        ),
+        probs=base_cfg.noise_family_probs,
+        rng=rng,
+    )
+    missing_mode = _sample_from_distribution(
+        default_value=str(base_cfg.missing_mode),
+        choices=(
+            None
+            if base_cfg.missing_mode_choices is None
+            else tuple(str(v) for v in base_cfg.missing_mode_choices)
+        ),
+        probs=base_cfg.missing_mode_probs,
+        rng=rng,
+    )
+    kernel_family = _sample_from_distribution(
+        default_value=str(base_cfg.kernel_family),
+        choices=(
+            None
+            if base_cfg.kernel_family_choices is None
+            else tuple(str(v) for v in base_cfg.kernel_family_choices)
+        ),
+        probs=base_cfg.kernel_family_probs,
+        rng=rng,
+    )
+
+    student_df = float(base_cfg.student_df)
+    if (
+        noise_family == "student_t"
+        and base_cfg.student_df_min is not None
+        and base_cfg.student_df_max is not None
+    ):
+        student_df = float(
+            rng.uniform(base_cfg.student_df_min, base_cfg.student_df_max)
+        )
+
+    variant_cfg = base_cfg.with_overrides(
+        mechanism_type=mechanism_type,
+        noise_family=noise_family,
+        missing_mode=missing_mode,
+        kernel_family=kernel_family,
+        student_df=student_df,
+    )
+    variant_metadata: dict[str, int | float | str] = {
+        "sampled_mechanism_type": mechanism_type,
+        "sampled_noise_family": noise_family,
+        "sampled_missing_mode": missing_mode,
+        "sampled_kernel_family": kernel_family,
+        "sampled_mechanism_type_id": int(_MECHANISM_FAMILIES.index(mechanism_type)),
+        "sampled_noise_family_id": int(_NOISE_FAMILIES.index(noise_family)),
+        "sampled_missing_mode_id": int(_MISSING_MODES.index(missing_mode)),
+        "sampled_kernel_family_id": int(_KERNEL_FAMILIES.index(kernel_family)),
+        "sampled_student_df": float(student_df),
+    }
+    return variant_cfg, variant_metadata

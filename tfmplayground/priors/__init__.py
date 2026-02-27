@@ -1,5 +1,6 @@
 """Priors Python module for data prior configurations."""
 
+from .audit import audit_prior_dump, integrity_errors
 from .dataloader import (
     DynSCMPriorDataLoader,
     PriorDataLoader,
@@ -7,7 +8,12 @@ from .dataloader import (
     TabICLPriorDataLoader,
     TICLPriorDataLoader,
 )
-from .dynscm import DynSCMConfig, make_get_batch_dynscm
+from .dynscm import (
+    DynSCMConfig,
+    dynscm_family_id_mappings,
+    make_get_batch_dynscm,
+    sample_dynscm_variant_cfg,
+)
 from .utils import build_tabpfn_prior, build_ticl_prior
 
 try:
@@ -23,9 +29,13 @@ __all__ = [
     "PriorDumpDataLoader",
     "TabICLPriorDataLoader",
     "TICLPriorDataLoader",
+    "audit_prior_dump",
     "build_ticl_prior",
     "build_tabpfn_prior",
+    "integrity_errors",
     "make_get_batch_dynscm",
+    "sample_dynscm_variant_cfg",
+    "dynscm_family_id_mappings",
 ]
 
 if TabPFNPriorDataLoader is not None:
