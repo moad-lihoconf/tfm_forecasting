@@ -63,10 +63,12 @@ def test_submit_vertex_script_dry_run_local_prior(tmp_path: Path) -> None:
         "[dry-run] image: "
         "us-central1-docker.pkg.dev/test-project/tfm-forecasting/trainer-gpu:latest"
     )
+    expected_accelerator = "acceleratorType: 'NVIDIA_L4'"
     assert expected_prior_uri in stdout
     assert "gcloud storage cp" in stdout
     assert "--display-name tfm-regression-run_local" in stdout
     assert expected_image_uri in stdout
+    assert expected_accelerator in stdout
 
 
 def test_submit_vertex_script_dry_run_gcs_prior(tmp_path: Path) -> None:
@@ -104,7 +106,9 @@ def test_submit_vertex_script_dry_run_gcs_prior(tmp_path: Path) -> None:
         "[dry-run] image: "
         "us-central1-docker.pkg.dev/test-project/tfm-forecasting/trainer-gpu:latest"
     )
+    expected_accelerator = "acceleratorType: 'NVIDIA_L4'"
     assert expected_prior_uri in stdout
     assert "upload command: <none, gs:// priordump already accessible>" in stdout
     assert "gcloud storage cp" not in stdout
     assert expected_image_uri in stdout
+    assert expected_accelerator in stdout

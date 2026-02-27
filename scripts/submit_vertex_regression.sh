@@ -16,7 +16,7 @@ Options:
   --bucket BUCKET          Bucket or gs://bucket[/prefix] for canonical storage root
   --image IMAGE_URI        Training container image URI
   --machine-type TYPE      Vertex machine type (default: n1-standard-8)
-  --accelerator-type TYPE  GPU type (default: NVIDIA_TESLA_T4)
+  --accelerator-type TYPE  GPU type (default: NVIDIA_L4)
   --accelerator-count N    GPU count (default: 1)
   --service-account EMAIL  Optional service account for Vertex job
   --dry-run                Print resolved commands/config without submitting
@@ -43,7 +43,7 @@ REGION="${VERTEX_REGION:-}"
 BUCKET_INPUT="${VERTEX_BUCKET:-}"
 IMAGE_URI="${VERTEX_IMAGE_URI:-}"
 MACHINE_TYPE="${VERTEX_MACHINE_TYPE:-n1-standard-8}"
-ACCELERATOR_TYPE="${VERTEX_ACCELERATOR_TYPE:-NVIDIA_TESLA_T4}"
+ACCELERATOR_TYPE="${VERTEX_ACCELERATOR_TYPE:-NVIDIA_L4}"
 ACCELERATOR_COUNT="${VERTEX_ACCELERATOR_COUNT:-1}"
 SERVICE_ACCOUNT="${VERTEX_SERVICE_ACCOUNT:-}"
 DRY_RUN=0
