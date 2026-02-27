@@ -9,6 +9,7 @@ Build (and optionally push) the GPU Docker image.
 
 Options:
   --image IMAGE_URI   Image URI to tag (default derived from gcloud/env)
+  --tag TAG           Image tag when deriving the default image URI
   --no-cache          Disable Docker build cache
   --cache             Enable Docker build cache (default)
   --pull              Always attempt to pull a newer base image
@@ -32,15 +33,30 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 IMAGE_URI="${IMAGE_URI:-}"
+IMAGE_TAG="${IMAGE_TAG:-}"
 NO_CACHE=0
 PULL=0
 PUSH=0
 PLATFORM="${DOCKER_PLATFORM:-}"
 
+require_value() {
+  local opt="$1"
+  local val="${2-}"
+  if [[ -z "$val" || "$val" == --* ]]; then
+    echo "Error: ${opt} requires a non-empty value." >&2
+    exit 2
+  fi
+  printf '%s\n' "$val"
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --image)
-      IMAGE_URI="${2:-}"
+      IMAGE_URI="$(require_value "$1" "${2-}")"
+      shift 2
+      ;;
+    --tag)
+      IMAGE_TAG="$(require_value "$1" "${2-}")"
       shift 2
       ;;
     --no-cache)
@@ -64,7 +80,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --platform)
-      PLATFORM="${2:-}"
+      PLATFORM="$(require_value "$1" "${2-}")"
       shift 2
       ;;
     -h|--help)
@@ -97,12 +113,28 @@ _gcloud_value() {
   printf '%s\n' "$out"
 }
 
+tag_to_latest() {
+  local image_uri="$1"
+  if [[ "$image_uri" == *@* ]]; then
+    return 1
+  fi
+  if [[ "$image_uri" != *:* ]]; then
+    printf '%s:latest\n' "$image_uri"
+    return 0
+  fi
+  printf '%s:latest\n' "${image_uri%:*}"
+}
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 if [[ -z "${IMAGE_URI}" ]]; then
   PROJECT="${VERTEX_PROJECT:-${GCP_PROJECT:-$(_gcloud_value project || true)}}"
   REGION="${VERTEX_REGION:-$(_gcloud_value ai/region || true)}"
   REPOSITORY="${AR_REPOSITORY:-tfm-forecasting}"
   IMAGE_NAME="${IMAGE_NAME:-trainer-gpu}"
-  IMAGE_TAG="${IMAGE_TAG:-latest}"
+  if [[ -z "${IMAGE_TAG}" ]]; then
+    IMAGE_TAG="latest"
+  fi
 
   if [[ -z "${PROJECT}" ]]; then
     echo "Error: could not determine project. Set --image, VERTEX_PROJECT, GCP_PROJECT, or gcloud project config." >&2
@@ -115,7 +147,6 @@ if [[ -z "${IMAGE_URI}" ]]; then
   IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT}/${REPOSITORY}/${IMAGE_NAME}:${IMAGE_TAG}"
 fi
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DOCKERFILE="${ROOT_DIR}/Dockerfile.gpu"
 
 if [[ ! -f "${DOCKERFILE}" ]]; then
@@ -137,7 +168,21 @@ fi
 echo "[gpu] building: ${IMAGE_URI}"
 docker build "${BUILD_OPTS[@]}" "${ROOT_DIR}"
 
+LATEST_IMAGE_URI=""
+if ! LATEST_IMAGE_URI="$(tag_to_latest "${IMAGE_URI}")"; then
+  echo "Error: cannot derive :latest tag from digest-based image URI: ${IMAGE_URI}" >&2
+  exit 2
+fi
+if [[ "${LATEST_IMAGE_URI}" != "${IMAGE_URI}" ]]; then
+  echo "[gpu] tagging: ${LATEST_IMAGE_URI}"
+  docker tag "${IMAGE_URI}" "${LATEST_IMAGE_URI}"
+fi
+
 if [[ "${PUSH}" -eq 1 ]]; then
   echo "[gpu] pushing: ${IMAGE_URI}"
   docker push "${IMAGE_URI}"
+  if [[ "${LATEST_IMAGE_URI}" != "${IMAGE_URI}" ]]; then
+    echo "[gpu] pushing: ${LATEST_IMAGE_URI}"
+    docker push "${LATEST_IMAGE_URI}"
+  fi
 fi

@@ -269,6 +269,8 @@ export VERTEX_PROJECT="your-gcp-project"
 export VERTEX_REGION="us-central1"
 bash scripts/update_docker_gpu.sh --push
 ```
+This builds and pushes `trainer-gpu:latest` by default. If you pass `--tag`,
+the script also mirrors that same image to `:latest`.
 
 2. Generate a DynSCM prior directly to GCS (or generate locally and upload):
 ```bash
