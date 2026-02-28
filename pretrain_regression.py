@@ -12,6 +12,7 @@ import h5py
 import torch
 from pfns.bar_distribution import FullSupportBarDistribution
 from sklearn.metrics import r2_score
+from torch import nn
 
 from tfmplayground.callbacks import ConsoleLoggerCallback
 from tfmplayground.evaluation import TOY_TASKS_REGRESSION, get_openml_predictions
@@ -84,6 +85,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--lr", type=float, default=1e-4, help="learning rate")
     parser.add_argument(
+        "--optimizer",
+        type=str,
+        default="adamw_schedulefree",
+        choices=["adamw_schedulefree", "adamw"],
+        help="optimizer used for training",
+    )
+    parser.add_argument(
         "--steps",
         type=int,
         default=100,
@@ -99,16 +107,62 @@ def _build_parser() -> argparse.ArgumentParser:
         help="checkpoint from which to continue training (local or gs://)",
     )
     parser.add_argument(
+        "--warm_start",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "load model weights from --loadcheckpoint but reset optimizer state, "
+            "epoch counters, data offset, and early-stopping state"
+        ),
+    )
+    parser.add_argument(
         "--n_buckets",
         type=int,
         default=100,
         help="number of buckets for the data loader",
     )
     parser.add_argument(
+        "--regression_loss",
+        type=str,
+        default="bar",
+        choices=["bar", "mse", "huber"],
+        help="regression objective used during training",
+    )
+    parser.add_argument(
+        "--huber_delta",
+        type=float,
+        default=1.0,
+        help="delta parameter for Huber regression loss",
+    )
+    parser.add_argument(
         "--val_split",
         type=float,
         default=0.1,
         help="fraction of prior functions used for validation (0,1)",
+    )
+    parser.add_argument(
+        "--train_subset_size",
+        type=int,
+        default=None,
+        help=(
+            "optional deterministic cap on the number of training functions "
+            "used after the train/validation split"
+        ),
+    )
+    parser.add_argument(
+        "--val_subset_size",
+        type=int,
+        default=None,
+        help=(
+            "optional deterministic cap on the number of validation functions "
+            "used after the train/validation split"
+        ),
+    )
+    parser.add_argument(
+        "--split_seed",
+        type=int,
+        default=2402,
+        help="seed used for deterministic train/validation partitioning",
     )
     parser.add_argument(
         "--early_stopping_metric",
@@ -200,10 +254,73 @@ def _build_parser() -> argparse.ArgumentParser:
         help="mixed precision dtype to use when --amp is enabled on CUDA",
     )
     parser.add_argument(
+        "--loss_weighting",
+        type=str,
+        default="per_target",
+        choices=["per_target", "per_function"],
+        help="how to weight loss across variable numbers of supervised targets",
+    )
+    parser.add_argument(
+        "--target_normalization",
+        type=str,
+        default="per_function_zscore",
+        choices=["per_function_zscore", "per_function_clamped", "none"],
+        help="normalization applied to regression targets before loss computation",
+    )
+    parser.add_argument(
+        "--target_std_floor",
+        type=float,
+        default=1e-2,
+        help=(
+            "minimum standard deviation used for --target_normalization="
+            "per_function_clamped"
+        ),
+    )
+    parser.add_argument(
+        "--min_train_target_std",
+        type=float,
+        default=0.0,
+        help=(
+            "skip per-function regression losses when the training-target standard "
+            "deviation is below this threshold"
+        ),
+    )
+    parser.add_argument(
         "--runname",
         type=str,
         default="nanoTFM",
         help="training run name, used for workdir checkpoints",
+    )
+    parser.add_argument(
+        "--feature_normalization",
+        type=str,
+        default="per_function_zscore",
+        choices=["per_function_zscore", "none"],
+        help="normalization applied by the feature encoder",
+    )
+    parser.add_argument(
+        "--debug_output_clamp",
+        type=float,
+        default=None,
+        help="optional absolute clamp for scalar decoder outputs during diagnostics",
+    )
+    parser.add_argument(
+        "--debug_train_trace_json",
+        type=str,
+        default=None,
+        help="optional JSON path for structured per-batch training diagnostics",
+    )
+    parser.add_argument(
+        "--debug_trace_first_n_batches",
+        type=int,
+        default=0,
+        help="record structured diagnostics for the first N global train batches",
+    )
+    parser.add_argument(
+        "--debug_trace_every_n_batches",
+        type=int,
+        default=0,
+        help="record structured diagnostics every N global train batches",
     )
     parser.add_argument(
         "--checkpoint_gcs_dir",
@@ -276,12 +393,28 @@ def main(argv: list[str] | None = None) -> None:
     local_temp_dirs: list[Path] = []
     try:
         local_priordump = path_for_read(args.priordump)
+        local_debug_trace_path = None
+        gcs_debug_trace_path = None
+        if args.debug_train_trace_json is not None:
+            local_debug_trace_path, gcs_debug_trace_path = _prepare_output_path(
+                args.debug_train_trace_json,
+                local_temp_dirs,
+            )
 
         device = torch.device(get_default_device())
         ckpt = None
         if args.loadcheckpoint:
             ckpt_path = path_for_read(args.loadcheckpoint)
             ckpt = torch.load(ckpt_path)
+            checkpoint_regression_loss = ckpt.get(
+                "regression_loss",
+                ckpt.get("training", {}).get("regression_loss", "bar"),
+            )
+            if checkpoint_regression_loss != args.regression_loss:
+                raise ValueError(
+                    "Checkpoint regression_loss does not match requested "
+                    "--regression_loss."
+                )
         amp_dtype = _resolve_amp_dtype(args.amp_dtype)
         use_amp = bool(args.amp and device.type == "cuda")
         print(
@@ -304,6 +437,50 @@ def main(argv: list[str] | None = None) -> None:
             raise ValueError("--early_stopping_patience must be >= 1.")
         if args.dropout < 0.0 or args.dropout >= 1.0:
             raise ValueError("--dropout must be in [0, 1).")
+        if args.huber_delta <= 0.0:
+            raise ValueError("--huber_delta must be > 0.")
+        if args.warm_start and args.loadcheckpoint is None:
+            raise ValueError("--warm_start requires --loadcheckpoint.")
+        if args.train_subset_size is not None and args.train_subset_size < 1:
+            raise ValueError("--train_subset_size must be >= 1 when provided.")
+        if args.val_subset_size is not None and args.val_subset_size < 1:
+            raise ValueError("--val_subset_size must be >= 1 when provided.")
+        if args.target_std_floor <= 0.0:
+            raise ValueError("--target_std_floor must be > 0.")
+        if args.min_train_target_std < 0.0:
+            raise ValueError("--min_train_target_std must be >= 0.")
+        if args.debug_output_clamp is not None and args.debug_output_clamp <= 0.0:
+            raise ValueError("--debug_output_clamp must be > 0 when provided.")
+        if args.debug_trace_first_n_batches < 0:
+            raise ValueError("--debug_trace_first_n_batches must be >= 0.")
+        if args.debug_trace_every_n_batches < 0:
+            raise ValueError("--debug_trace_every_n_batches must be >= 0.")
+        if args.regression_loss != "bar" and args.openml_eval_every_epochs > 0:
+            raise ValueError(
+                "--openml_eval_every_epochs requires --regression_loss=bar."
+            )
+        if ckpt:
+            checkpoint_target_normalization = ckpt.get(
+                "target_normalization",
+                ckpt.get(
+                    "training",
+                    {},
+                ).get("target_normalization", "per_function_zscore"),
+            )
+            if checkpoint_target_normalization != args.target_normalization:
+                raise ValueError(
+                    "Checkpoint target_normalization does not match requested "
+                    "--target_normalization."
+                )
+            checkpoint_feature_normalization = ckpt.get(
+                "architecture",
+                {},
+            ).get("feature_normalization", "per_function_zscore")
+            if checkpoint_feature_normalization != args.feature_normalization:
+                raise ValueError(
+                    "Checkpoint feature_normalization does not match requested "
+                    "--feature_normalization."
+                )
 
         prior_audit = audit_prior_dump(local_priordump, sample_limit=4096)
         audit_failures = integrity_errors(prior_audit)
@@ -364,9 +541,28 @@ def main(argv: list[str] | None = None) -> None:
                 "Computed validation split is empty or full. "
                 f"total={total_functions}, val_split={args.val_split}"
             )
-        perm = torch.randperm(total_functions, device="cpu")
+        split_generator = torch.Generator(device="cpu")
+        split_generator.manual_seed(args.split_seed)
+        perm = torch.randperm(total_functions, generator=split_generator, device="cpu")
         val_indices = perm[:val_count].tolist()
         train_indices = perm[val_count:].tolist()
+
+        if args.train_subset_size is not None:
+            if args.train_subset_size > len(train_indices):
+                raise ValueError(
+                    "--train_subset_size exceeds the available training split size. "
+                    f"train_subset_size={args.train_subset_size}, "
+                    f"train={len(train_indices)}"
+                )
+            train_indices = train_indices[: args.train_subset_size]
+        if args.val_subset_size is not None:
+            if args.val_subset_size > len(val_indices):
+                raise ValueError(
+                    "--val_subset_size exceeds the available validation split size. "
+                    f"val_subset_size={args.val_subset_size}, "
+                    f"val={len(val_indices)}"
+                )
+            val_indices = val_indices[: args.val_subset_size]
 
         if len(train_indices) < args.batchsize or len(val_indices) < args.batchsize:
             raise ValueError(
@@ -376,7 +572,7 @@ def main(argv: list[str] | None = None) -> None:
                 f"batchsize={args.batchsize}"
             )
 
-        resumed_epoch = int(ckpt["epoch"]) if ckpt else 0
+        resumed_epoch = int(ckpt["epoch"]) if (ckpt and not args.warm_start) else 0
         train_start = args.steps * args.batchsize * resumed_epoch
         val_steps = _resolve_val_steps(
             args.val_steps,
@@ -405,33 +601,76 @@ def main(argv: list[str] | None = None) -> None:
             embedding_size=args.embeddingsize,
             mlp_hidden_size=args.hiddensize,
             num_layers=args.layers,
-            num_outputs=args.n_buckets,
+            num_outputs=(args.n_buckets if args.regression_loss == "bar" else 1),
             dropout=(
                 float(ckpt["architecture"].get("dropout", args.dropout))
                 if ckpt
                 else args.dropout
             ),
+            feature_normalization=(
+                str(
+                    ckpt["architecture"].get(
+                        "feature_normalization",
+                        args.feature_normalization,
+                    )
+                )
+                if ckpt
+                else args.feature_normalization
+            ),
+            debug_output_clamp=(
+                (
+                    None
+                    if ckpt["architecture"].get("debug_output_clamp") is None
+                    else float(ckpt["architecture"]["debug_output_clamp"])
+                )
+                if ckpt
+                else args.debug_output_clamp
+            ),
         )
 
-        bucket_edges = make_global_bucket_edges(
-            filename=local_priordump,
-            n_buckets=args.n_buckets,
-            device=device,
-            indices=train_indices,
-        )
+        bucket_artifact: dict[str, object] | torch.Tensor
+        criterion: nn.Module
+        dist: FullSupportBarDistribution | None = None
+        if args.regression_loss == "bar":
+            bucket_edges = make_global_bucket_edges(
+                filename=local_priordump,
+                n_buckets=args.n_buckets,
+                device=device,
+                indices=train_indices,
+            )
+            bucket_artifact = bucket_edges
+            dist = FullSupportBarDistribution(bucket_edges)
+            criterion = dist
+        elif args.regression_loss == "mse":
+            bucket_artifact = {
+                "regression_loss": args.regression_loss,
+                "bucket_edges": None,
+            }
+            criterion = nn.MSELoss(reduction="none")
+        else:
+            bucket_artifact = {
+                "regression_loss": args.regression_loss,
+                "bucket_edges": None,
+                "huber_delta": float(args.huber_delta),
+            }
+            criterion = nn.HuberLoss(delta=args.huber_delta, reduction="none")
 
         local_savebuckets, gcs_savebuckets = _prepare_output_path(
             args.savebuckets,
             local_temp_dirs,
         )
-        torch.save(bucket_edges, local_savebuckets)
+        torch.save(bucket_artifact, local_savebuckets)
         if gcs_savebuckets is not None:
             upload_local_file_to_gcs(local_savebuckets, gcs_savebuckets)
 
         if ckpt:
+            checkpoint_optimizer = ckpt.get("optimizer_name", args.optimizer)
+            if checkpoint_optimizer != args.optimizer:
+                raise ValueError(
+                    "Checkpoint optimizer_name does not match requested --optimizer."
+                )
             model.load_state_dict(ckpt["model"])
-
-        dist = FullSupportBarDistribution(bucket_edges)
+        train_ckpt = None if args.warm_start else ckpt
 
         class EvaluationLoggerCallback(ConsoleLoggerCallback):
             def __init__(self, tasks: list[int], every_epochs: int):
@@ -447,6 +686,8 @@ def main(argv: list[str] | None = None) -> None:
                 **kwargs,
             ):
                 if self.every_epochs <= 0 or epoch % self.every_epochs != 0:
+                    return
+                if dist is None:
                     return
                 regressor = NanoTabPFNRegressor(model, dist, device)
                 predictions = get_openml_predictions(model=regressor, tasks=self.tasks)
@@ -482,13 +723,13 @@ def main(argv: list[str] | None = None) -> None:
             model=model,
             prior=prior,
             val_prior=val_prior,
-            criterion=dist,
+            criterion=criterion,
             epochs=args.epochs,
             accumulate_gradients=args.accumulate,
             lr=args.lr,
             device=device,
             callbacks=callbacks,
-            ckpt=ckpt,
+            ckpt=train_ckpt,
             eval_every_epochs=args.eval_every_epochs,
             max_train_seconds=(
                 None
@@ -505,7 +746,25 @@ def main(argv: list[str] | None = None) -> None:
             run_name=args.runname,
             use_amp=use_amp,
             amp_dtype=amp_dtype,
+            loss_weighting=args.loss_weighting,
+            optimizer_name=args.optimizer,
+            regression_loss_name=args.regression_loss,
+            target_normalization=args.target_normalization,
+            target_std_floor=args.target_std_floor,
+            min_train_target_std=args.min_train_target_std,
+            debug_trace_path=local_debug_trace_path,
+            debug_trace_first_n_batches=args.debug_trace_first_n_batches,
+            debug_trace_every_n_batches=args.debug_trace_every_n_batches,
         )
+        if (
+            gcs_debug_trace_path is not None
+            and local_debug_trace_path is not None
+            and Path(local_debug_trace_path).exists()
+        ):
+            upload_local_file_to_gcs(local_debug_trace_path, gcs_debug_trace_path)
+        train_info["debug_trace_path"] = args.debug_train_trace_json
+        train_info["warm_start"] = bool(args.warm_start)
+        train_info["loadcheckpoint"] = args.loadcheckpoint
 
         trained_model = trained_model.to("cpu")
         checkpoint_payload = {
@@ -516,14 +775,31 @@ def main(argv: list[str] | None = None) -> None:
                 "mlp_hidden_size": int(trained_model.mlp_hidden_size),
                 "num_outputs": int(trained_model.num_outputs),
                 "dropout": float(getattr(trained_model, "dropout", args.dropout)),
+                "feature_normalization": str(
+                    getattr(
+                        trained_model,
+                        "feature_normalization",
+                        args.feature_normalization,
+                    )
+                ),
+                "debug_output_clamp": getattr(
+                    trained_model,
+                    "debug_output_clamp",
+                    args.debug_output_clamp,
+                ),
             },
             "model": trained_model.state_dict(),
             "training": train_info,
+            "optimizer_name": args.optimizer,
+            "regression_loss": args.regression_loss,
             "split": {
                 "total_functions": total_functions,
                 "train_count": len(train_indices),
                 "val_count": len(val_indices),
                 "val_split": args.val_split,
+                "split_seed": args.split_seed,
+                "train_subset_size": args.train_subset_size,
+                "val_subset_size": args.val_subset_size,
                 "val_steps": val_steps,
             },
             "prior_audit": prior_audit,
@@ -547,6 +823,7 @@ def main(argv: list[str] | None = None) -> None:
             best_payload = {
                 "architecture": best_state["architecture"],
                 "model": best_state["model"],
+                "regression_loss": args.regression_loss,
                 "training": {
                     "best_epoch": best_state.get(
                         "best_epoch",
@@ -557,6 +834,37 @@ def main(argv: list[str] | None = None) -> None:
                         train_info.get("best_metric", float("inf")),
                     ),
                     "stop_reason": train_info.get("stop_reason", "completed"),
+                    "loss_weighting": train_info.get(
+                        "loss_weighting",
+                        args.loss_weighting,
+                    ),
+                    "optimizer_name": train_info.get(
+                        "optimizer_name",
+                        args.optimizer,
+                    ),
+                    "regression_loss": train_info.get(
+                        "regression_loss",
+                        args.regression_loss,
+                    ),
+                    "target_normalization": train_info.get(
+                        "target_normalization",
+                        args.target_normalization,
+                    ),
+                    "target_std_floor": train_info.get(
+                        "target_std_floor",
+                        args.target_std_floor,
+                    ),
+                    "min_train_target_std": train_info.get(
+                        "min_train_target_std",
+                        args.min_train_target_std,
+                    ),
+                    "debug_trace_path": train_info.get(
+                        "debug_trace_path",
+                        args.debug_train_trace_json,
+                    ),
+                    "split_seed": args.split_seed,
+                    "train_subset_size": args.train_subset_size,
+                    "val_subset_size": args.val_subset_size,
                 },
             }
         except FileNotFoundError:

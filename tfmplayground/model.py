@@ -1,6 +1,7 @@
 import math
 import warnings
 from collections.abc import Callable
+from typing import Literal
 
 import torch
 import torch.nn.functional as F
@@ -17,6 +18,10 @@ class NanoTabPFNModel(nn.Module):
         num_layers: int,
         num_outputs: int,
         dropout: float = 0.0,
+        feature_normalization: Literal[
+            "per_function_zscore", "none"
+        ] = "per_function_zscore",
+        debug_output_clamp: float | None = None,
     ):
         """Initializes the feature/target encoder, transformer stack and decoder"""
         super().__init__()
@@ -26,7 +31,12 @@ class NanoTabPFNModel(nn.Module):
         self.num_layers = num_layers
         self.num_outputs = num_outputs
         self.dropout = dropout
-        self.feature_encoder = FeatureEncoder(embedding_size)
+        self.feature_normalization = feature_normalization
+        self.debug_output_clamp = debug_output_clamp
+        self.feature_encoder = FeatureEncoder(
+            embedding_size,
+            normalization=feature_normalization,
+        )
         self.target_encoder = TargetEncoder(embedding_size)
         self.transformer_encoder = TransformerEncoderStack(
             num_layers,
@@ -36,7 +46,11 @@ class NanoTabPFNModel(nn.Module):
             dropout=dropout,
         )
         self.decoder = Decoder(
-            embedding_size, mlp_hidden_size, num_outputs, dropout=dropout
+            embedding_size,
+            mlp_hidden_size,
+            num_outputs,
+            dropout=dropout,
+            output_clamp=debug_output_clamp,
         )
 
     def forward(self, *args, **kwargs) -> torch.Tensor:
@@ -117,9 +131,14 @@ class NanoTabPFNModel(nn.Module):
 
 # handle variable number of features in here?
 class FeatureEncoder(nn.Module):
-    def __init__(self, embedding_size: int):
+    def __init__(
+        self,
+        embedding_size: int,
+        normalization: Literal["per_function_zscore", "none"] = "per_function_zscore",
+    ):
         """Creates the linear layer that we will use to embed our features."""
         super().__init__()
+        self.normalization = normalization
         self.linear_layer = nn.Linear(1, embedding_size)
 
     def forward(self, x: torch.Tensor, single_eval_pos: int) -> torch.Tensor:
@@ -141,10 +160,16 @@ class FeatureEncoder(nn.Module):
                 of the features
         """
         x = x.unsqueeze(-1)
-        mean = torch.mean(x[:, :single_eval_pos], dim=1, keepdim=True)
-        std = torch.std(x[:, :single_eval_pos], dim=1, keepdim=True) + 1e-8
-        x = (x - mean) / std
-        x = torch.clip(x, min=-100, max=100)
+        if self.normalization == "per_function_zscore":
+            mean = torch.mean(x[:, :single_eval_pos], dim=1, keepdim=True)
+            std = torch.std(x[:, :single_eval_pos], dim=1, keepdim=True) + 1e-8
+            x = (x - mean) / std
+            x = torch.clip(x, min=-100, max=100)
+        elif self.normalization != "none":
+            raise ValueError(
+                "FeatureEncoder.normalization must be one of "
+                "{'per_function_zscore', 'none'}."
+            )
         return self.linear_layer(x)
 
 
@@ -398,12 +423,14 @@ class Decoder(nn.Module):
         mlp_hidden_size: int,
         num_outputs: int,
         dropout: float = 0.0,
+        output_clamp: float | None = None,
     ):
         """Initializes the linear layers for use in the forward"""
         super().__init__()
         self.linear1 = nn.Linear(embedding_size, mlp_hidden_size)
         self.linear2 = nn.Linear(mlp_hidden_size, num_outputs)
         self.dropout = nn.Dropout(dropout)
+        self.output_clamp = output_clamp
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -416,4 +443,7 @@ class Decoder(nn.Module):
             (torch.Tensor) shape
                 (batch_size, num_rows, num_outputs)
         """
-        return self.linear2(self.dropout(F.gelu(self.linear1(x))))
+        output = self.linear2(self.dropout(F.gelu(self.linear1(x))))
+        if self.output_clamp is not None:
+            output = torch.clamp(output, min=-self.output_clamp, max=self.output_clamp)
+        return output

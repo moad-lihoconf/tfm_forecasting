@@ -33,6 +33,14 @@ def _instantiate_model_from_arch_payload(arch: dict[str, Any]) -> NanoTabPFNMode
         num_layers=int(arch["num_layers"]),
         num_outputs=int(arch["num_outputs"]),
         dropout=float(arch.get("dropout", 0.0)),
+        feature_normalization=str(
+            arch.get("feature_normalization", "per_function_zscore")
+        ),
+        debug_output_clamp=(
+            None
+            if arch.get("debug_output_clamp") is None
+            else float(arch["debug_output_clamp"])
+        ),
     )
 
 
@@ -261,8 +269,16 @@ class NanoTabPFNRegressor:
             model = init_model_from_state_dict_file(model)
 
         if isinstance(dist, str):
-            bucket_edges = torch.load(dist, map_location=device)
-            dist = FullSupportBarDistribution(bucket_edges).float()
+            dist_payload = torch.load(dist, map_location=device)
+            if isinstance(dist_payload, dict):
+                bucket_edges = dist_payload.get("bucket_edges")
+                dist = (
+                    FullSupportBarDistribution(bucket_edges).float()
+                    if bucket_edges is not None
+                    else None
+                )
+            else:
+                dist = FullSupportBarDistribution(dist_payload).float()
 
         assert isinstance(model, NanoTabPFNModel)
         self.model = model.to(device)
@@ -305,8 +321,18 @@ class NanoTabPFNRegressor:
                 single_eval_pos=len(self.X_train),
                 num_mem_chunks=self.num_mem_chunks,
             ).squeeze(0)
-            assert isinstance(self.dist, FullSupportBarDistribution)
-            preds_n = self.dist.mean(logits)
+            if isinstance(self.dist, FullSupportBarDistribution):
+                preds_n = self.dist.mean(logits)
+            else:
+                if logits.ndim == 2 and logits.shape[-1] == 1:
+                    preds_n = logits.squeeze(-1)
+                elif logits.ndim == 1:
+                    preds_n = logits
+                else:
+                    raise ValueError(
+                        "Scalar regression checkpoints require a single-output "
+                        "model or a bar-distribution artifact."
+                    )
             preds = preds_n * self.y_train_std + self.y_train_mean
 
         return preds.cpu().numpy()

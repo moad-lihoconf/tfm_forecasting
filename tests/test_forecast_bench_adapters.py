@@ -259,6 +259,42 @@ def test_nanotabpfn_regressor_uses_default_raw_checkpoint_layout(
     assert isinstance(regressor.model, NanoTabPFNModel)
 
 
+def test_nanotabpfn_regressor_supports_scalar_regression_without_dist():
+    model = NanoTabPFNModel(
+        num_attention_heads=1,
+        embedding_size=8,
+        mlp_hidden_size=16,
+        num_layers=1,
+        num_outputs=1,
+        dropout=0.0,
+    )
+
+    def _forward(data, single_eval_pos: int, num_mem_chunks: int = 8):
+        del num_mem_chunks
+        x, _y = data
+        return torch.zeros(
+            (x.shape[0], x.shape[1] - int(single_eval_pos), 1),
+            dtype=torch.float32,
+            device=x.device,
+        )
+
+    model.forward = _forward  # type: ignore[method-assign]
+    regressor = NanoTabPFNRegressor(
+        model=model,
+        dist=None,
+        device="cpu",
+    )
+    x_train = np.array([[0.0], [1.0], [2.0]], dtype=np.float32)
+    y_train = np.array([10.0, 12.0, 14.0], dtype=np.float32)
+    x_test = np.array([[3.0], [4.0]], dtype=np.float32)
+
+    regressor.fit(x_train, y_train)
+    preds = regressor.predict(x_test)
+
+    assert preds.shape == (2,)
+    assert np.allclose(preds, np.mean(y_train))
+
+
 def test_init_model_from_state_dict_file_rejects_invalid_raw_checkpoint(tmp_path: Path):
     bad_path = tmp_path / "bad_model.pth"
     torch.save(OrderedDict({"decoder.linear1.weight": torch.zeros((2, 2))}), bad_path)

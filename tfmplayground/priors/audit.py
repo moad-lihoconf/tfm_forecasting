@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from typing import cast
@@ -49,7 +50,7 @@ def _as_mapping(value: object) -> Mapping[object, object] | None:
     return None
 
 
-def _load_family_name_mappings(h5_file: h5py.File) -> dict[str, dict[int, str]]:
+def _load_dump_metadata_payload(h5_file: h5py.File) -> dict[str, object]:
     if "dump_metadata_json" not in h5_file:
         return {}
     raw_metadata = h5_file["dump_metadata_json"][()]
@@ -61,6 +62,13 @@ def _load_family_name_mappings(h5_file: h5py.File) -> dict[str, dict[int, str]]:
         payload = json.loads(metadata_text)
     except json.JSONDecodeError:
         return {}
+    if not isinstance(payload, dict):
+        return {}
+    return cast(dict[str, object], payload)
+
+
+def _load_family_name_mappings(h5_file: h5py.File) -> dict[str, dict[int, str]]:
+    payload = _load_dump_metadata_payload(h5_file)
     raw_mappings = payload.get("dynscm_family_id_mappings")
     if not isinstance(raw_mappings, dict):
         return {}
@@ -81,12 +89,44 @@ def _load_family_name_mappings(h5_file: h5py.File) -> dict[str, dict[int, str]]:
     return mappings
 
 
+def _support(values: np.ndarray) -> list[int]:
+    if values.size == 0:
+        return []
+    return [int(v) for v in np.unique(values).tolist()]
+
+
+def _feature_block_stats(values: np.ndarray) -> dict[str, float]:
+    return _safe_stats(values.astype(np.float64))
+
+
+def _deterministic_feature_count(dynscm_cfg: Mapping[object, object]) -> int:
+    return (
+        int(bool(dynscm_cfg.get("add_time_feature", True)))
+        + int(bool(dynscm_cfg.get("add_horizon_feature", True)))
+        + int(bool(dynscm_cfg.get("add_log_horizon", True)))
+        + (2 if bool(dynscm_cfg.get("add_seasonality", True)) else 0)
+    )
+
+
+def _target_entropy(values: np.ndarray, *, bins: int = 64) -> float:
+    if values.size == 0:
+        return float("nan")
+    clipped = np.clip(values.astype(np.float64), -6.0, 6.0)
+    hist, _ = np.histogram(clipped, bins=bins, range=(-6.0, 6.0), density=False)
+    total = int(np.sum(hist))
+    if total == 0:
+        return float("nan")
+    probabilities = hist.astype(np.float64) / float(total)
+    return _shannon_entropy(probabilities)
+
+
 def audit_prior_dump(
     filename: str,
     *,
     sample_limit: int | None = None,
     nonzero_eps: float = 1e-12,
     chunk_size: int = 256,
+    duplicate_round_decimals: int = 3,
 ) -> dict[str, object]:
     """Compute a structural audit for an HDF5 prior dump.
 
@@ -103,7 +143,9 @@ def audit_prior_dump(
         if sample_limit is not None:
             inspected = min(num_functions, max(1, int(sample_limit)))
         inspected_indices = np.arange(inspected, dtype=np.int64)
+        metadata_payload = _load_dump_metadata_payload(f)
         family_name_mappings = _load_family_name_mappings(f)
+        dynscm_cfg = _as_mapping(metadata_payload.get("dynscm_config"))
 
         has_num_datapoints = "num_datapoints" in f
         single_eval_pos = np.asarray(
@@ -129,6 +171,21 @@ def audit_prior_dump(
             )
         else:
             pre_budget_feature_count = np.full((inspected,), -1, dtype=np.int64)
+        sampled_num_vars = (
+            np.asarray(f["sampled_num_vars"][inspected_indices], dtype=np.int64)
+            if "sampled_num_vars" in f
+            else np.full((inspected,), -1, dtype=np.int64)
+        )
+        sampled_n_train = (
+            np.asarray(f["sampled_n_train"][inspected_indices], dtype=np.int64)
+            if "sampled_n_train" in f
+            else single_eval_pos.copy()
+        )
+        sampled_n_test = (
+            np.asarray(f["sampled_n_test"][inspected_indices], dtype=np.int64)
+            if "sampled_n_test" in f
+            else np.clip(num_datapoints - single_eval_pos, 0, None)
+        )
 
         target_rows = np.clip(num_datapoints - single_eval_pos, 0, None)
         num_datapoints_out_of_range = int(
@@ -143,6 +200,9 @@ def audit_prior_dump(
         active_feature_counts = np.zeros((inspected,), dtype=np.int64)
         train_y_std: list[float] = []
         target_y_std: list[float] = []
+        normalized_target_values: list[np.ndarray] = []
+        exact_hashes: set[bytes] = set()
+        near_hashes: set[bytes] = set()
         family_id_datasets = {
             "mechanism_type": "sampled_mechanism_type_id",
             "noise_family": "sampled_noise_family_id",
@@ -184,12 +244,41 @@ def audit_prior_dump(
                 sep_i = int(max(0, min(sep_chunk[local_idx], nd_i)))
                 train_target = y_chunk[local_idx, :sep_i]
                 test_target = y_chunk[local_idx, sep_i:nd_i]
+                x_row = x_chunk[local_idx, :nd_i, :]
+                y_row = y_chunk[local_idx, :nd_i]
+                exact_hashes.add(
+                    hashlib.blake2b(
+                        x_row.tobytes()
+                        + y_row.tobytes()
+                        + np.asarray([sep_i, nd_i], dtype=np.int32).tobytes(),
+                        digest_size=16,
+                    ).digest()
+                )
+                near_hashes.add(
+                    hashlib.blake2b(
+                        np.round(x_row, duplicate_round_decimals)
+                        .astype(np.float32, copy=False)
+                        .tobytes()
+                        + np.round(y_row, duplicate_round_decimals)
+                        .astype(np.float32, copy=False)
+                        .tobytes()
+                        + np.asarray([sep_i, nd_i], dtype=np.int32).tobytes(),
+                        digest_size=16,
+                    ).digest()
+                )
                 if train_target.size > 0:
                     ddof = 1 if train_target.size > 1 else 0
-                    train_y_std.append(float(np.std(train_target, ddof=ddof)))
+                    train_std = float(np.std(train_target, ddof=ddof))
+                    train_y_std.append(train_std)
                 if test_target.size > 0:
                     ddof = 1 if test_target.size > 1 else 0
                     target_y_std.append(float(np.std(test_target, ddof=ddof)))
+                if train_target.size > 0 and test_target.size > 0:
+                    train_mean = float(np.mean(train_target))
+                    train_scale = train_std if train_std > 1e-8 else 1.0
+                    normalized_target_values.append(
+                        (test_target.astype(np.float64) - train_mean) / train_scale
+                    )
 
     inferred_padding_rows = np.clip(num_datapoints - inferred_effective_rows, 0, None)
     inferred_padded_target_rows = np.minimum(inferred_padding_rows, target_rows)
@@ -211,6 +300,55 @@ def audit_prior_dump(
         feature_truncation_fraction = float(
             np.mean(pre_budget_feature_count > feature_dim)
         )
+    duplicate_fraction = 1.0 - (len(exact_hashes) / max(1, inspected))
+    near_duplicate_fraction = 1.0 - (len(near_hashes) / max(1, inspected))
+    effective_target_entropy = _target_entropy(
+        np.concatenate(normalized_target_values, axis=0)
+        if normalized_target_values
+        else np.asarray([], dtype=np.float64)
+    )
+
+    configured_horizon_support: list[int] = []
+    configured_explicit_lags: list[int] = []
+    configured_num_kernels: int | None = None
+    configured_max_feature_lag: int | None = None
+    configured_add_mask_channels: bool | None = None
+    feature_block_counts: dict[str, dict[str, float]] = {}
+    if dynscm_cfg is not None:
+        configured_horizon_support = [
+            int(v) for v in cast(list[object], dynscm_cfg.get("forecast_horizons", []))
+        ]
+        configured_explicit_lags = [
+            int(v) for v in cast(list[object], dynscm_cfg.get("explicit_lags", []))
+        ]
+        configured_num_kernels = int(cast(int, dynscm_cfg.get("num_kernels", 0)))
+        configured_max_feature_lag = int(
+            cast(int, dynscm_cfg.get("max_feature_lag", 0))
+        )
+        configured_add_mask_channels = bool(dynscm_cfg.get("add_mask_channels", False))
+        valid_num_vars = sampled_num_vars[sampled_num_vars >= 0]
+        if valid_num_vars.size > 0:
+            lag_width = valid_num_vars * len(configured_explicit_lags)
+            kernel_width = valid_num_vars * int(configured_num_kernels)
+            data_width = lag_width + kernel_width
+            mask_width = (
+                data_width
+                if configured_add_mask_channels
+                else np.zeros_like(data_width)
+            )
+            deterministic_width = np.full(
+                valid_num_vars.shape,
+                _deterministic_feature_count(dynscm_cfg),
+                dtype=np.int64,
+            )
+            total_width = data_width + mask_width + deterministic_width
+            feature_block_counts = {
+                "deterministic": _feature_block_stats(deterministic_width),
+                "lag_values": _feature_block_stats(lag_width),
+                "kernel_values": _feature_block_stats(kernel_width),
+                "data_mask": _feature_block_stats(mask_width),
+                "total_pre_budget_theoretical": _feature_block_stats(total_width),
+            }
 
     family_distributions: dict[str, dict[str, float]] = {}
     family_entropies: dict[str, float] = {}
@@ -271,6 +409,18 @@ def audit_prior_dump(
         "pre_budget_feature_count_median": pre_budget_stats["median"],
         "pre_budget_feature_count_max": pre_budget_stats["max"],
         "feature_truncation_fraction": feature_truncation_fraction,
+        "duplicate_fraction": float(duplicate_fraction),
+        "near_duplicate_fraction": float(near_duplicate_fraction),
+        "effective_target_entropy": float(effective_target_entropy),
+        "num_vars_support": _support(sampled_num_vars[sampled_num_vars >= 0]),
+        "n_train_support": _support(sampled_n_train),
+        "n_test_support": _support(sampled_n_test),
+        "horizon_support": configured_horizon_support,
+        "configured_explicit_lags": configured_explicit_lags,
+        "configured_num_kernels": configured_num_kernels,
+        "configured_max_feature_lag": configured_max_feature_lag,
+        "configured_add_mask_channels": configured_add_mask_channels,
+        "feature_block_counts": feature_block_counts,
         "has_variant_family_metadata": bool(len(family_distributions) > 0),
         "family_distributions": family_distributions,
         "family_entropies": family_entropies,

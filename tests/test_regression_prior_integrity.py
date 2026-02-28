@@ -31,6 +31,22 @@ class _AbsCriterion:
         return torch.abs(output - targets)
 
 
+class _ClassificationTargetCriterion:
+    def __call__(self, output: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        del output
+        return targets.to(torch.float32)
+
+
+class _ConstantClassificationModel(nn.Module):
+    def forward(self, data, single_eval_pos: int):
+        x, _y = data
+        return torch.zeros(
+            (x.shape[0], x.shape[1] - int(single_eval_pos), 1),
+            dtype=torch.float32,
+            device=x.device,
+        )
+
+
 def _write_dump(
     path: Path,
     *,
@@ -459,6 +475,111 @@ def test_validation_loss_is_stable_across_repeated_calls(tmp_path: Path) -> None
         classification_task=False,
     )
     assert first == pytest.approx(second)
+
+
+def test_validation_loss_uses_selected_weighting() -> None:
+    model = _ConstantClassificationModel()
+    criterion = _ClassificationTargetCriterion()
+
+    class _ValidationBatches:
+        def __iter__(self):
+            yield {
+                "x": torch.randn(1, 4, 3, dtype=torch.float32),
+                "y": torch.zeros((1, 4), dtype=torch.float32),
+                "target_y": torch.tensor([[0.0, 0.0, 10.0, 20.0]], dtype=torch.float32),
+                "single_eval_pos": 2,
+            }
+            yield {
+                "x": torch.randn(1, 4, 3, dtype=torch.float32),
+                "y": torch.zeros((1, 4), dtype=torch.float32),
+                "target_y": torch.tensor(
+                    [[0.0, 30.0, 40.0, 50.0]],
+                    dtype=torch.float32,
+                ),
+                "single_eval_pos": 1,
+            }
+
+        def __len__(self):
+            return 2
+
+    per_function = train_mod._evaluate_prior_loss(
+        wrapped_model=model,
+        val_prior=_ValidationBatches(),
+        criterion=criterion,
+        device=torch.device("cpu"),
+        regression_task=False,
+        classification_task=True,
+        loss_weighting="per_function",
+    )
+    per_target = train_mod._evaluate_prior_loss(
+        wrapped_model=model,
+        val_prior=_ValidationBatches(),
+        criterion=criterion,
+        device=torch.device("cpu"),
+        regression_task=False,
+        classification_task=True,
+        loss_weighting="per_target",
+    )
+
+    assert per_function == pytest.approx(27.5)
+    assert per_target == pytest.approx(30.0)
+
+
+def test_compute_loss_ignores_rows_beyond_subgroup_max_num_datapoints() -> None:
+    model = _ZeroOutputModel()
+    criterion = _AbsCriterion()
+    full_batch = {
+        "x": torch.zeros((2, 6, 3), dtype=torch.float32),
+        "y": torch.tensor(
+            [
+                [-1.0, 1.0, 2.0, 4.0, 999.0, 999.0],
+                [-2.0, 2.0, 1.0, 5.0, 6.0, 999.0],
+            ],
+            dtype=torch.float32,
+        ),
+        "target_y": torch.tensor(
+            [
+                [-1.0, 1.0, 2.0, 4.0, 999.0, 999.0],
+                [-2.0, 2.0, 1.0, 5.0, 6.0, 999.0],
+            ],
+            dtype=torch.float32,
+        ),
+        "single_eval_pos": torch.tensor([2, 3], dtype=torch.long),
+        "num_datapoints": torch.tensor([4, 5], dtype=torch.long),
+        "target_mask": torch.tensor(
+            [
+                [False, False, True, True, False, False],
+                [False, False, False, True, True, False],
+            ]
+        ),
+    }
+    cropped_batch = {
+        "x": full_batch["x"][:, :5].clone(),
+        "y": full_batch["y"][:, :5].clone(),
+        "target_y": full_batch["target_y"][:, :5].clone(),
+        "single_eval_pos": full_batch["single_eval_pos"].clone(),
+        "num_datapoints": full_batch["num_datapoints"].clone(),
+        "target_mask": full_batch["target_mask"][:, :5].clone(),
+    }
+
+    full_loss = train_mod._compute_loss(
+        wrapped_model=model,
+        criterion=criterion,
+        full_data=full_batch,
+        device=torch.device("cpu"),
+        regression_task=True,
+        classification_task=False,
+    )
+    cropped_loss = train_mod._compute_loss(
+        wrapped_model=model,
+        criterion=criterion,
+        full_data=cropped_batch,
+        device=torch.device("cpu"),
+        regression_task=True,
+        classification_task=False,
+    )
+
+    assert float(full_loss) == pytest.approx(float(cropped_loss))
 
 
 def test_pretrain_strict_integrity_rejects_legacy_like_dump(tmp_path: Path) -> None:
