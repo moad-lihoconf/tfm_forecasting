@@ -1,5 +1,6 @@
 import os
-from typing import Any
+from contextlib import suppress
+from typing import Any, Literal, cast
 
 import numpy as np
 import pandas as pd
@@ -23,6 +24,8 @@ _OFFICIAL_REGRESSOR_ARCH = {
     "num_outputs": 100,
     "dropout": 0.0,
 }
+
+TargetNormalization = Literal["per_function_zscore", "per_function_clamped", "none"]
 
 
 def _instantiate_model_from_arch_payload(arch: dict[str, Any]) -> NanoTabPFNModel:
@@ -71,19 +74,66 @@ def init_model_from_state_dict_file(file_path):
     Reads model architecture from state dict,
     instantiates the architecture and loads the weights.
     """
-    state_dict = torch.load(file_path, map_location=torch.device("cpu"))
-    if (
-        isinstance(state_dict, dict)
-        and "architecture" in state_dict
-        and "model" in state_dict
-    ):
-        model = _instantiate_model_from_arch_payload(state_dict["architecture"])
-        model.load_state_dict(state_dict["model"])
-        return model
-    if _looks_like_raw_model_state_dict(state_dict):
+    model, _meta = _load_model_with_checkpoint_metadata(file_path)
+    return model
+
+
+def _extract_target_normalization_metadata(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Extracts target normalization settings from known checkpoint payload shapes.
+
+    Supported shapes:
+    - train.py "latest_checkpoint.pth"/"best_checkpoint.pth": top-level keys
+      "target_normalization" and "target_std_floor".
+    - pretrain_regression.py best-weights payload: nested under "training".
+    """
+
+    training = payload.get("training")
+    if isinstance(training, dict):
+        target_normalization = training.get("target_normalization")
+        target_std_floor = training.get("target_std_floor")
+        if target_normalization is not None:
+            return {
+                "target_normalization": target_normalization,
+                "target_std_floor": target_std_floor,
+            }
+
+    # Legacy / training_state payload.
+    if "target_normalization" in payload:
+        return {
+            "target_normalization": payload.get("target_normalization"),
+            "target_std_floor": payload.get("target_std_floor"),
+        }
+
+    return {}
+
+
+def _load_model_with_checkpoint_metadata(
+    file_path: str,
+) -> tuple[NanoTabPFNModel, dict[str, Any]]:
+    """
+    Loads a NanoTabPFNModel from a checkpoint file and returns extracted
+    metadata that may influence inference behavior.
+    """
+    payload = torch.load(file_path, map_location=torch.device("cpu"))
+
+    if isinstance(payload, dict) and "architecture" in payload and "model" in payload:
+        model = _instantiate_model_from_arch_payload(
+            cast(dict[str, Any], payload["architecture"])
+        )
+        model.load_state_dict(cast(dict[str, Any], payload["model"]))
+        meta = _extract_target_normalization_metadata(cast(dict[str, Any], payload))
+        return model, meta
+
+    if _looks_like_raw_model_state_dict(payload):
         model = _instantiate_model_from_arch_payload(_OFFICIAL_REGRESSOR_ARCH)
-        model.load_state_dict(_normalize_official_raw_state_dict_keys(state_dict))
-        return model
+        model.load_state_dict(
+            _normalize_official_raw_state_dict_keys(cast(dict[str, Any], payload))
+        )
+        return model, {}
+
     raise ValueError(
         "Unsupported checkpoint format in "
         f"{file_path!r}: expected wrapped checkpoint with architecture/model "
@@ -244,9 +294,15 @@ class NanoTabPFNRegressor:
         dist: FullSupportBarDistribution | str | None = None,
         device: str | torch.device | None = None,
         num_mem_chunks: int = 8,
+        target_normalization: TargetNormalization | None = None,
+        target_std_floor: float | None = None,
     ):
         if device is None:
             device = get_default_device()
+        self.target_normalization: TargetNormalization | None = target_normalization
+        self.target_std_floor: float = (
+            1e-2 if target_std_floor is None else float(target_std_floor)
+        )
         if model is None:
             os.makedirs("checkpoints", exist_ok=True)
             model = "checkpoints/nanotabpfn_regressor.pth"
@@ -266,7 +322,16 @@ class NanoTabPFNRegressor:
                 with open(dist, "wb") as f:
                     f.write(response.content)
         if isinstance(model, str):
-            model = init_model_from_state_dict_file(model)
+            model, meta = _load_model_with_checkpoint_metadata(model)
+            if self.target_normalization is None:
+                maybe_norm = meta.get("target_normalization")
+                if isinstance(maybe_norm, str):
+                    self.target_normalization = cast(TargetNormalization, maybe_norm)
+            if target_std_floor is None:
+                maybe_floor = meta.get("target_std_floor")
+                if maybe_floor is not None:
+                    with suppress(TypeError, ValueError):
+                        self.target_std_floor = float(maybe_floor)
 
         if isinstance(dist, str):
             dist_payload = torch.load(dist, map_location=device)
@@ -285,6 +350,17 @@ class NanoTabPFNRegressor:
         self.device = device
         self.dist = dist
         self.num_mem_chunks = num_mem_chunks
+        if self.target_normalization is None:
+            # Default behavior matches the official released regressor wrapper.
+            self.target_normalization = "per_function_zscore"
+        if self.target_normalization not in {
+            "per_function_zscore",
+            "per_function_clamped",
+            "none",
+        }:
+            raise ValueError(
+                f"Unsupported target_normalization: {self.target_normalization!r}"
+            )
 
     def fit(self, X_train: np.ndarray, y_train: np.ndarray):
         """
@@ -295,8 +371,19 @@ class NanoTabPFNRegressor:
         self.X_train = self.feature_preprocessor.fit_transform(X_train)
         self.y_train = y_train
 
-        self.y_train_mean = np.mean(self.y_train)
-        self.y_train_std = np.std(self.y_train, ddof=1) + 1e-8
+        if self.target_normalization == "none":
+            self.y_train_mean = 0.0
+            self.y_train_std = 1.0
+            self.y_train_n = self.y_train
+            return
+
+        self.y_train_mean = float(np.mean(self.y_train))
+        raw_std = float(np.std(self.y_train, ddof=1))
+        if not np.isfinite(raw_std):
+            raw_std = 0.0
+        if self.target_normalization == "per_function_clamped":
+            raw_std = max(raw_std, float(self.target_std_floor))
+        self.y_train_std = raw_std + 1e-8
         self.y_train_n = (self.y_train - self.y_train_mean) / self.y_train_std
 
     def predict(self, X_test: np.ndarray) -> np.ndarray:

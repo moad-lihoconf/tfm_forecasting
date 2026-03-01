@@ -295,6 +295,102 @@ def test_nanotabpfn_regressor_supports_scalar_regression_without_dist():
     assert np.allclose(preds, np.mean(y_train))
 
 
+def _make_wrapped_checkpoint(
+    path: Path,
+    *,
+    target_normalization: str | None = None,
+    target_std_floor: float | None = None,
+    training_nested: bool = True,
+) -> Path:
+    model = NanoTabPFNModel(
+        num_attention_heads=1,
+        embedding_size=8,
+        mlp_hidden_size=16,
+        num_layers=1,
+        num_outputs=1,
+        dropout=0.0,
+    )
+    payload: dict[str, object] = {
+        "architecture": {
+            "num_attention_heads": 1,
+            "embedding_size": 8,
+            "mlp_hidden_size": 16,
+            "num_layers": 1,
+            "num_outputs": 1,
+            "dropout": 0.0,
+        },
+        "model": model.state_dict(),
+    }
+    if target_normalization is not None:
+        if training_nested:
+            payload["training"] = {
+                "target_normalization": target_normalization,
+                "target_std_floor": target_std_floor,
+            }
+        else:
+            payload["target_normalization"] = target_normalization
+            payload["target_std_floor"] = target_std_floor
+    torch.save(payload, path)
+    return path
+
+
+def test_nanotabpfn_regressor_reads_target_normalization_none_from_ckpt(
+    tmp_path: Path,
+):
+    ckpt_path = _make_wrapped_checkpoint(
+        tmp_path / "ckpt_none_top_level.pth",
+        target_normalization="none",
+        target_std_floor=0.123,
+        training_nested=False,
+    )
+    regressor = NanoTabPFNRegressor(model=str(ckpt_path), dist=None, device="cpu")
+
+    assert regressor.target_normalization == "none"
+
+    def _forward(data, single_eval_pos: int, num_mem_chunks: int = 8):
+        del num_mem_chunks
+        x, _y = data
+        return torch.zeros(
+            (x.shape[0], x.shape[1] - int(single_eval_pos), 1),
+            dtype=torch.float32,
+            device=x.device,
+        )
+
+    regressor.model.forward = _forward  # type: ignore[method-assign]
+    x_train = np.array([[0.0], [1.0], [2.0]], dtype=np.float32)
+    y_train = np.array([10.0, 12.0, 14.0], dtype=np.float32)
+    x_test = np.array([[3.0], [4.0]], dtype=np.float32)
+    regressor.fit(x_train, y_train)
+
+    preds = regressor.predict(x_test)
+
+    # With target_normalization=none, predict() should not renormalize.
+    assert np.allclose(regressor.y_train_n, y_train)
+    assert np.allclose(preds, 0.0)
+
+
+def test_nanotabpfn_regressor_reads_target_normalization_clamped_and_applies_floor(
+    tmp_path: Path,
+):
+    ckpt_path = _make_wrapped_checkpoint(
+        tmp_path / "ckpt_clamped_nested.pth",
+        target_normalization="per_function_clamped",
+        target_std_floor=0.5,
+        training_nested=True,
+    )
+    regressor = NanoTabPFNRegressor(model=str(ckpt_path), dist=None, device="cpu")
+
+    assert regressor.target_normalization == "per_function_clamped"
+    assert regressor.target_std_floor == 0.5
+
+    x_train = np.array([[0.0], [1.0], [2.0]], dtype=np.float32)
+    y_train = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+    regressor.fit(x_train, y_train)
+
+    assert regressor.y_train_std >= 0.5
+    assert np.allclose(regressor.y_train_n, 0.0)
+
+
 def test_init_model_from_state_dict_file_rejects_invalid_raw_checkpoint(tmp_path: Path):
     bad_path = tmp_path / "bad_model.pth"
     torch.save(OrderedDict({"decoder.linear1.weight": torch.zeros((2, 2))}), bad_path)
