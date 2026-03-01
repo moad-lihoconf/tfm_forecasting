@@ -6,7 +6,7 @@ import math
 import shutil
 import tempfile
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import h5py
 import torch
@@ -27,6 +27,14 @@ from tfmplayground.utils import (
     make_global_bucket_edges,
     set_randomness_seed,
 )
+
+FeatureNormalization = Literal["per_function_zscore", "none"]
+
+
+def _feature_normalization(value: object) -> FeatureNormalization:
+    if value not in {"per_function_zscore", "none"}:
+        raise ValueError(f"Unsupported feature normalization: {value!r}.")
+    return cast(FeatureNormalization, value)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -608,14 +616,14 @@ def main(argv: list[str] | None = None) -> None:
                 else args.dropout
             ),
             feature_normalization=(
-                str(
+                _feature_normalization(
                     ckpt["architecture"].get(
                         "feature_normalization",
                         args.feature_normalization,
                     )
                 )
                 if ckpt
-                else args.feature_normalization
+                else _feature_normalization(args.feature_normalization)
             ),
             debug_output_clamp=(
                 (

@@ -26,6 +26,7 @@ from .parallel import (
     sample_dataset_dimensions,
     slice_or_empty,
 )
+from .research import DynSCMSampleFilterConfig
 
 
 class DynSCMBatchGenerator:
@@ -39,6 +40,11 @@ class DynSCMBatchGenerator:
         seed: int | None = None,
         workers: int = 1,
         worker_blas_threads: int = 1,
+        cfg_override_sampler: (
+            Callable[[np.random.Generator, int], dict[str, object] | None] | None
+        ) = None,
+        sample_filter: DynSCMSampleFilterConfig | None = None,
+        max_sample_attempts_per_item: int = 1,
     ) -> None:
         self.cfg = cfg
         self.target_device = torch.device(device)
@@ -47,10 +53,16 @@ class DynSCMBatchGenerator:
             raise ValueError("workers must be >= 1.")
         if worker_blas_threads < 1:
             raise ValueError("worker_blas_threads must be >= 1.")
+        if max_sample_attempts_per_item < 1:
+            raise ValueError("max_sample_attempts_per_item must be >= 1.")
         self.workers = int(workers)
         self.worker_blas_threads = int(worker_blas_threads)
+        self.cfg_override_sampler = cfg_override_sampler
+        self.sample_filter = sample_filter
+        self.max_sample_attempts_per_item = int(max_sample_attempts_per_item)
         self._executor: ProcessPoolExecutor | None = None
         self._row_pair_cache: dict[int, np.ndarray] = {}
+        self._batch_index = 0
 
     def __call__(
         self,
@@ -71,6 +83,10 @@ class DynSCMBatchGenerator:
             rng=self.state_rng,
             cache=self._row_pair_cache,
         )
+        cfg_overrides = None
+        if self.cfg_override_sampler is not None:
+            cfg_overrides = self.cfg_override_sampler(self.state_rng, self._batch_index)
+        self._batch_index += 1
 
         sample_seeds = draw_seed_bundles(
             self.state_rng,
@@ -94,6 +110,9 @@ class DynSCMBatchGenerator:
                     n_test=n_test,
                     row_budget=num_datapoints_max,
                     num_features=num_features,
+                    cfg_overrides=cfg_overrides,
+                    sample_filter=self.sample_filter,
+                    max_generation_attempts=self.max_sample_attempts_per_item,
                 )
                 x_batch[idx] = x_i
                 y_batch[idx] = y_i
@@ -106,6 +125,15 @@ class DynSCMBatchGenerator:
                     n_test=n_test,
                     row_budget=num_datapoints_max,
                     num_features=num_features,
+                    cfg_overrides=(
+                        None if cfg_overrides is None else dict(cfg_overrides)
+                    ),
+                    filter_payload=(
+                        None
+                        if self.sample_filter is None
+                        else self.sample_filter.to_payload()
+                    ),
+                    max_generation_attempts=self.max_sample_attempts_per_item,
                 )
                 for sample_seed in sample_seeds
             ]
@@ -192,6 +220,11 @@ def make_get_batch_dynscm(
     *,
     workers: int = 1,
     worker_blas_threads: int = 1,
+    cfg_override_sampler: (
+        Callable[[np.random.Generator, int], dict[str, object] | None] | None
+    ) = None,
+    sample_filter: DynSCMSampleFilterConfig | None = None,
+    max_sample_attempts_per_item: int = 1,
 ) -> Callable[[int, int, int], dict[str, torch.Tensor | int]]:
     """Return stateful DynSCM batch generator for `PriorDataLoader`."""
     return DynSCMBatchGenerator(
@@ -200,6 +233,9 @@ def make_get_batch_dynscm(
         seed=seed,
         workers=workers,
         worker_blas_threads=worker_blas_threads,
+        cfg_override_sampler=cfg_override_sampler,
+        sample_filter=sample_filter,
+        max_sample_attempts_per_item=max_sample_attempts_per_item,
     )
 
 

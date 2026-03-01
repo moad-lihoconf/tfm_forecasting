@@ -56,6 +56,7 @@ def dynscm_modules():
         "simulate",
         "missingness",
         "features",
+        "research",
         "get_batch",
     ):
         modules[name] = _load_module(
@@ -84,12 +85,17 @@ def priors_modules(dynscm_modules):
     sys.modules["tfmplayground.priors.utils"] = utils_stub
 
     main_mod = _load_module("tfmplayground.priors.main", priors_dir / "main.py")
+    research_profiles_mod = _load_module(
+        "tfmplayground.priors.dynscm.research_profiles",
+        priors_dir / "dynscm" / "research_profiles.py",
+    )
     root_mod = _load_module("tfmplayground.priors", priors_dir / "__init__.py")
 
     return {
         **dynscm_modules,
         "dataloader": dataloader_mod,
         "main": main_mod,
+        "research_profiles": research_profiles_mod,
         "root": root_mod,
     }
 

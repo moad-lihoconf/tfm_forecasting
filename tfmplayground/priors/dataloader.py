@@ -21,6 +21,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency.
 
 if TYPE_CHECKING:
     from .dynscm import DynSCMConfig
+    from .dynscm.research import DynSCMSampleFilterConfig
 
 
 class PriorDataLoader(DataLoader):
@@ -307,6 +308,11 @@ class DynSCMPriorDataLoader(PriorDataLoader):
         seed: int | None = None,
         workers: int = 1,
         worker_blas_threads: int = 1,
+        cfg_override_sampler: (
+            Callable[[np.random.Generator, int], dict[str, object] | None] | None
+        ) = None,
+        sample_filter: "DynSCMSampleFilterConfig | None" = None,
+        max_sample_attempts_per_item: int = 1,
     ):
         from .dynscm import make_get_batch_dynscm
 
@@ -317,6 +323,9 @@ class DynSCMPriorDataLoader(PriorDataLoader):
                 seed=seed,
                 workers=workers,
                 worker_blas_threads=worker_blas_threads,
+                cfg_override_sampler=cfg_override_sampler,
+                sample_filter=sample_filter,
+                max_sample_attempts_per_item=max_sample_attempts_per_item,
             ),
             num_steps=num_steps,
             batch_size=batch_size,

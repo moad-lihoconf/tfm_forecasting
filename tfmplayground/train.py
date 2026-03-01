@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import schedulefree
 import torch
@@ -180,14 +180,23 @@ def _compute_loss_result(
     target_y = full_data["target_y"].to(device)
     target_mask_full = full_data.get("target_mask")
     num_datapoints_full = full_data.get("num_datapoints")
-    if target_mask_full is not None:
+    if isinstance(target_mask_full, torch.Tensor):
         target_mask_full = target_mask_full.to(device=device, dtype=torch.bool)
         if target_mask_full.ndim != 2:
             raise ValueError("target_mask must have shape (batch_size, num_rows).")
         if target_mask_full.shape != y.shape:
             raise ValueError("target_mask shape must match y/target_y shape.")
+    else:
+        target_mask_full = None
     if torch.is_tensor(num_datapoints_full):
-        num_datapoints_full = num_datapoints_full.to(device=device, dtype=torch.long)
+        num_datapoints_full = cast(torch.Tensor, num_datapoints_full).to(
+            device=device,
+            dtype=torch.long,
+        )
+    else:
+        num_datapoints_full = (
+            int(num_datapoints_full) if num_datapoints_full is not None else None
+        )
 
     def _loss_for_fixed_eval_pos(
         x_batch: torch.Tensor,
@@ -203,7 +212,9 @@ def _compute_loss_result(
             "filtered_low_std_functions": 0,
         }
         if torch.is_tensor(num_datapoints_batch):
-            max_num_datapoints = int(num_datapoints_batch.max().item())
+            max_num_datapoints = int(
+                cast(torch.Tensor, num_datapoints_batch).max().item()
+            )
         elif num_datapoints_batch is not None:
             max_num_datapoints = int(num_datapoints_batch)
         else:
@@ -232,21 +243,21 @@ def _compute_loss_result(
                         weight=0,
                         debug=debug,
                     )
-                if not torch.all(valid):
-                    x_batch = x_batch[valid]
-                    y_batch = y_batch[valid]
-                    target_y_batch = target_y_batch[valid]
-                    if target_mask_batch is not None:
-                        target_mask_batch = target_mask_batch[valid]
-                    if torch.is_tensor(num_datapoints_batch):
-                        num_datapoints_batch = num_datapoints_batch[valid]
-                    data = (x_batch, y_batch[:, :eval_pos])
-                    targets = target_y_batch[:, eval_pos:]
-                    mask = (
-                        None
-                        if target_mask_batch is None
-                        else target_mask_batch[:, eval_pos:]
-                    )
+                    if not torch.all(valid):
+                        x_batch = x_batch[valid]
+                        y_batch = y_batch[valid]
+                        target_y_batch = target_y_batch[valid]
+                        if target_mask_batch is not None:
+                            target_mask_batch = target_mask_batch[valid]
+                        if torch.is_tensor(num_datapoints_batch):
+                            num_datapoints_batch = num_datapoints_batch[valid]
+                        data = (x_batch, y_batch[:, :eval_pos])
+                        targets = target_y_batch[:, eval_pos:]
+                        mask = (
+                            None
+                            if target_mask_batch is None
+                            else target_mask_batch[:, eval_pos:]
+                        )
                     y_mean = data[1].mean(dim=1, keepdim=True)
                     y_std = data[1].std(dim=1, keepdim=True)
             if target_normalization == "per_function_zscore":
@@ -524,7 +535,7 @@ def train(
     lr: float = 1e-4,
     device: torch.device | None = None,
     callbacks: Sequence[Callback] | None = None,
-    ckpt: dict[str, torch.Tensor] | None = None,
+    ckpt: dict[str, Any] | None = None,
     multi_gpu: bool = False,
     run_name: str = "nanoTFM",
     val_prior: DataLoader | None = None,
@@ -596,7 +607,7 @@ def train(
             "Checkpoint optimizer_name does not match requested optimizer_name."
         )
     if ckpt:
-        optimizer.load_state_dict(ckpt["optimizer"])
+        optimizer.load_state_dict(cast(dict[str, Any], ckpt["optimizer"]))
     classification_task = isinstance(criterion, nn.CrossEntropyLoss)
     regression_task = not classification_task
     amp_enabled = bool(use_amp and device.type == "cuda")
@@ -613,7 +624,8 @@ def train(
     if debug_trace_every_n_batches < 0:
         raise ValueError("debug_trace_every_n_batches must be >= 0.")
 
-    assert prior.num_steps % accumulate_gradients == 0, (
+    prior_num_steps = int(cast(Any, prior).num_steps)
+    assert prior_num_steps % accumulate_gradients == 0, (
         "num_steps must be divisible by accumulate_gradients"
     )
 
@@ -627,7 +639,10 @@ def train(
     best_epoch = ckpt.get("best_epoch", 0) if ckpt else 0
     patience_counter = 0
     if ckpt:
-        saved_early_stopping_state = ckpt.get("early_stopping_state", {})
+        saved_early_stopping_state: dict[str, Any] = cast(
+            dict[str, Any],
+            ckpt.get("early_stopping_state", {}),
+        )
         patience_counter = int(saved_early_stopping_state.get("patience_counter", 0))
     es_cfg = dict(early_stopping or {})
     metric_name = str(es_cfg.get("metric", "val_loss"))
@@ -810,6 +825,7 @@ def train(
                 epoch % eval_every_epochs == 0
             )
             if evaluated_this_epoch:
+                assert val_prior is not None
                 val_loss = _evaluate_prior_loss(
                     wrapped_model=wrapped_model,
                     val_prior=val_prior,

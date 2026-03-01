@@ -316,10 +316,11 @@ def audit_prior_dump(
     feature_block_counts: dict[str, dict[str, float]] = {}
     if dynscm_cfg is not None:
         configured_horizon_support = [
-            int(v) for v in cast(list[object], dynscm_cfg.get("forecast_horizons", []))
+            _as_int(v)
+            for v in cast(list[object], dynscm_cfg.get("forecast_horizons", []))
         ]
         configured_explicit_lags = [
-            int(v) for v in cast(list[object], dynscm_cfg.get("explicit_lags", []))
+            _as_int(v) for v in cast(list[object], dynscm_cfg.get("explicit_lags", []))
         ]
         configured_num_kernels = int(cast(int, dynscm_cfg.get("num_kernels", 0)))
         configured_max_feature_lag = int(

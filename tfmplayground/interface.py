@@ -26,6 +26,14 @@ _OFFICIAL_REGRESSOR_ARCH = {
 }
 
 TargetNormalization = Literal["per_function_zscore", "per_function_clamped", "none"]
+FeatureNormalization = Literal["per_function_zscore", "none"]
+
+
+def _feature_normalization_from_arch(arch: dict[str, Any]) -> FeatureNormalization:
+    value = arch.get("feature_normalization", "per_function_zscore")
+    if value not in {"per_function_zscore", "none"}:
+        raise ValueError(f"Unsupported feature_normalization: {value!r}.")
+    return cast(FeatureNormalization, value)
 
 
 def _instantiate_model_from_arch_payload(arch: dict[str, Any]) -> NanoTabPFNModel:
@@ -36,9 +44,7 @@ def _instantiate_model_from_arch_payload(arch: dict[str, Any]) -> NanoTabPFNMode
         num_layers=int(arch["num_layers"]),
         num_outputs=int(arch["num_outputs"]),
         dropout=float(arch.get("dropout", 0.0)),
-        feature_normalization=str(
-            arch.get("feature_normalization", "per_function_zscore")
-        ),
+        feature_normalization=_feature_normalization_from_arch(arch),
         debug_output_clamp=(
             None
             if arch.get("debug_output_clamp") is None

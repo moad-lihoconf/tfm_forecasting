@@ -18,6 +18,7 @@ from .features import build_forecasting_table, sample_origins_and_horizons
 from .graph import sample_regime_graphs
 from .mechanisms import sample_regime_mechanisms
 from .missingness import sample_observation_mask
+from .research import DynSCMSampleFilterConfig
 from .simulate import simulate_dynscm_series
 
 _SEED_MAX = np.iinfo(np.int64).max
@@ -32,6 +33,9 @@ class DynSCMWorkerTask:
     n_test: int
     row_budget: int
     num_features: int
+    cfg_overrides: dict[str, object] | None = None
+    filter_payload: dict[str, object] | None = None
+    max_generation_attempts: int = 1
 
 
 def configure_worker_runtime(*, blas_threads: int) -> None:
@@ -69,6 +73,9 @@ def generate_dynscm_worker_sample(
         n_test=task.n_test,
         row_budget=task.row_budget,
         num_features=task.num_features,
+        cfg_overrides=task.cfg_overrides,
+        sample_filter=DynSCMSampleFilterConfig.from_payload(task.filter_payload),
+        max_generation_attempts=task.max_generation_attempts,
     )
 
 
@@ -152,8 +159,67 @@ def build_single_dynscm_sample(
     n_test: int,
     row_budget: int,
     num_features: int,
+    cfg_overrides: Mapping[str, object] | None = None,
+    sample_filter: DynSCMSampleFilterConfig | None = None,
+    max_generation_attempts: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, int | float | str]]:
     """Generate exactly one padded DynSCM `(x_i, y_i)` sample."""
+    if max_generation_attempts < 1:
+        raise ValueError("max_generation_attempts must be >= 1.")
+    base_cfg = cfg.with_overrides(**dict(cfg_overrides)) if cfg_overrides else cfg
+    last_sample: tuple[np.ndarray, np.ndarray, dict[str, int | float | str]] | None = (
+        None
+    )
+    last_exc: RuntimeError | None = None
+    for attempt_idx in range(max_generation_attempts):
+        attempt_seed = _derive_attempt_seed(sample_seed, attempt_idx)
+        try:
+            x_padded, y_padded, sample_metadata = _build_single_dynscm_sample_once(
+                base_cfg,
+                sample_seed=int(attempt_seed),
+                n_train=n_train,
+                n_test=n_test,
+                row_budget=row_budget,
+                num_features=num_features,
+            )
+        except RuntimeError as exc:
+            last_exc = exc
+            continue
+        accepted = sample_filter.accepts(sample_metadata) if sample_filter else True
+        sample_metadata["sampled_filter_accept"] = int(accepted)
+        last_sample = (x_padded, y_padded, sample_metadata)
+        if accepted:
+            break
+    if last_sample is None:
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("DynSCM sample generation failed to produce any sample.")
+    return last_sample
+
+
+def _derive_attempt_seed(sample_seed: int, attempt_idx: int) -> int:
+    seed_seq = np.random.SeedSequence(
+        [int(sample_seed) % (2**32), int(attempt_idx) % (2**32)]
+    )
+    return int(seed_seq.generate_state(1, dtype=np.uint64)[0] % _SEED_MAX)
+
+
+def _sample_train_target_std(y_raw: np.ndarray, n_train: int) -> float:
+    train_targets = np.asarray(y_raw[0, :n_train], dtype=np.float64)
+    if train_targets.size <= 1:
+        return 0.0
+    return float(np.std(train_targets, ddof=1))
+
+
+def _build_single_dynscm_sample_once(
+    cfg: DynSCMConfig,
+    *,
+    sample_seed: int,
+    n_train: int,
+    n_test: int,
+    row_budget: int,
+    num_features: int,
+) -> tuple[np.ndarray, np.ndarray, dict[str, int | float | str]]:
     sample_rng = cfg.make_rng(sample_seed)
     variant_cfg, variant_metadata = sample_dynscm_variant_cfg(cfg, sample_rng)
     num_vars, num_steps, y_idx = sample_dataset_dimensions(variant_cfg, sample_rng)
@@ -228,6 +294,11 @@ def build_single_dynscm_sample(
         "sampled_n_train": int(n_train),
         "sampled_n_test": int(n_test),
         "sampled_pre_budget_feature_count": int(x_prioritized.shape[2]),
+        "sampled_simulation_clipped": int(bool(simulation_sample.clipped)),
+        "sampled_simulation_num_attempts": int(simulation_sample.num_attempts),
+        "sampled_simulation_max_abs_value": float(simulation_sample.max_abs_value),
+        "sampled_train_target_std": float(_sample_train_target_std(y_raw, n_train)),
+        "sampled_filter_accept": 1,
     }
 
     return (

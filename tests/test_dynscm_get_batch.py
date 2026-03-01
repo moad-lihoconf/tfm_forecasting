@@ -25,6 +25,11 @@ _RICHNESS_METADATA_KEYS = {
     "sampled_n_train",
     "sampled_n_test",
     "sampled_pre_budget_feature_count",
+    "sampled_simulation_clipped",
+    "sampled_simulation_num_attempts",
+    "sampled_simulation_max_abs_value",
+    "sampled_train_target_std",
+    "sampled_filter_accept",
 }
 
 
@@ -208,6 +213,229 @@ def test_make_get_batch_dynscm_parallel_matches_serial(dynscm_api):
     assert torch.equal(serial_2["target_mask"], parallel_2["target_mask"])
     for key in _RICHNESS_METADATA_KEYS:
         assert torch.equal(serial_2[key], parallel_2[key])
+
+
+def test_batch_shared_family_sampling_is_constant_within_batch(dynscm_api):
+    config_mod, get_batch_mod = dynscm_api
+    cfg = config_mod.DynSCMConfig.from_dict(
+        {
+            "num_variables_min": 3,
+            "num_variables_max": 4,
+            "series_length_min": 96,
+            "series_length_max": 120,
+            "max_lag": 6,
+            "train_rows_min": 8,
+            "train_rows_max": 8,
+            "test_rows_min": 4,
+            "test_rows_max": 4,
+            "mechanism_type_choices": ["linear_var", "linear_plus_residual"],
+            "mechanism_type_probs": [0.5, 0.5],
+            "noise_family_choices": ["normal", "student_t"],
+            "noise_family_probs": [0.5, 0.5],
+            "missing_mode_choices": ["off", "mcar"],
+            "missing_mode_probs": [0.5, 0.5],
+            "kernel_family_choices": ["exp_decay", "mix"],
+            "kernel_family_probs": [0.5, 0.5],
+        }
+    )
+    from tfmplayground.priors.dynscm.research import (
+        sample_batch_shared_family_overrides,
+    )
+
+    get_batch = get_batch_mod.make_get_batch_dynscm(
+        cfg,
+        device=torch.device("cpu"),
+        seed=13,
+        cfg_override_sampler=lambda rng, batch_index: (
+            sample_batch_shared_family_overrides(  # noqa: E501
+                cfg,
+                rng,
+                family_fields=(
+                    "mechanism_type",
+                    "noise_family",
+                    "missing_mode",
+                    "kernel_family",
+                ),
+            )
+        ),
+    )
+    batch = get_batch(batch_size=4, num_datapoints_max=16, num_features=24)
+
+    for key in (
+        "sampled_mechanism_type_id",
+        "sampled_noise_family_id",
+        "sampled_missing_mode_id",
+        "sampled_kernel_family_id",
+    ):
+        assert torch.unique(batch[key]).numel() == 1
+
+
+def test_parallel_matches_serial_with_batch_shared_overrides(dynscm_api):
+    config_mod, get_batch_mod = dynscm_api
+    cfg = config_mod.DynSCMConfig.from_dict(
+        {
+            "num_variables_min": 3,
+            "num_variables_max": 4,
+            "series_length_min": 96,
+            "series_length_max": 120,
+            "max_lag": 6,
+            "train_rows_min": 8,
+            "train_rows_max": 8,
+            "test_rows_min": 4,
+            "test_rows_max": 4,
+            "mechanism_type_choices": ["linear_var", "linear_plus_residual"],
+            "mechanism_type_probs": [0.5, 0.5],
+            "noise_family_choices": ["normal", "student_t"],
+            "noise_family_probs": [0.5, 0.5],
+        }
+    )
+    from tfmplayground.priors.dynscm.research import (
+        sample_batch_shared_family_overrides,
+    )
+
+    sampler = lambda rng, batch_index: sample_batch_shared_family_overrides(  # noqa: E731
+        cfg,
+        rng,
+        family_fields=("mechanism_type", "noise_family"),
+    )
+    serial = get_batch_mod.make_get_batch_dynscm(
+        cfg,
+        device=torch.device("cpu"),
+        seed=41,
+        workers=1,
+        cfg_override_sampler=sampler,
+    )
+    parallel = get_batch_mod.make_get_batch_dynscm(
+        cfg,
+        device=torch.device("cpu"),
+        seed=41,
+        workers=2,
+        worker_blas_threads=1,
+        cfg_override_sampler=sampler,
+    )
+    try:
+        batch_serial = serial(batch_size=3, num_datapoints_max=16, num_features=24)
+        batch_parallel = parallel(batch_size=3, num_datapoints_max=16, num_features=24)
+    finally:
+        _close_if_supported(serial)
+        _close_if_supported(parallel)
+
+    for key, value in batch_serial.items():
+        if torch.is_tensor(value):
+            assert torch.equal(value, batch_parallel[key])
+        else:
+            assert value == batch_parallel[key]
+
+
+def test_filter_metadata_and_bounded_resampling_are_deterministic(dynscm_api):
+    config_mod, get_batch_mod = dynscm_api
+    cfg = config_mod.DynSCMConfig.from_dict(
+        {
+            "num_variables_min": 3,
+            "num_variables_max": 4,
+            "series_length_min": 96,
+            "series_length_max": 120,
+            "max_lag": 6,
+            "train_rows_min": 8,
+            "train_rows_max": 8,
+            "test_rows_min": 4,
+            "test_rows_max": 4,
+        }
+    )
+    from tfmplayground.priors.dynscm.research import DynSCMSampleFilterConfig
+
+    sample_filter = DynSCMSampleFilterConfig(min_train_target_std=1e9)
+    get_batch_a = get_batch_mod.make_get_batch_dynscm(
+        cfg,
+        device=torch.device("cpu"),
+        seed=77,
+        sample_filter=sample_filter,
+        max_sample_attempts_per_item=2,
+    )
+    get_batch_b = get_batch_mod.make_get_batch_dynscm(
+        cfg,
+        device=torch.device("cpu"),
+        seed=77,
+        sample_filter=sample_filter,
+        max_sample_attempts_per_item=2,
+    )
+    batch_a = get_batch_a(batch_size=2, num_datapoints_max=16, num_features=24)
+    batch_b = get_batch_b(batch_size=2, num_datapoints_max=16, num_features=24)
+
+    assert torch.equal(batch_a["x"], batch_b["x"])
+    assert torch.equal(batch_a["y"], batch_b["y"])
+    assert torch.equal(
+        batch_a["sampled_filter_accept"], batch_b["sampled_filter_accept"]
+    )
+    assert torch.equal(
+        batch_a["sampled_simulation_num_attempts"],
+        batch_b["sampled_simulation_num_attempts"],
+    )
+    assert torch.all(batch_a["sampled_filter_accept"] == 0)
+    _close_if_supported(get_batch_a)
+    _close_if_supported(get_batch_b)
+
+
+def test_generation_runtime_errors_are_retried(monkeypatch, dynscm_api):
+    config_mod, _ = dynscm_api
+    from tfmplayground.priors.dynscm import parallel as parallel_mod
+
+    cfg = config_mod.DynSCMConfig.from_dict(
+        {
+            "num_variables_min": 3,
+            "num_variables_max": 3,
+            "series_length_min": 80,
+            "series_length_max": 80,
+            "train_rows_min": 4,
+            "train_rows_max": 4,
+            "test_rows_min": 2,
+            "test_rows_max": 2,
+        }
+    )
+    attempts: list[int] = []
+
+    def fake_once(
+        cfg,
+        *,
+        sample_seed,
+        n_train,
+        n_test,
+        row_budget,
+        num_features,
+    ):
+        attempts.append(int(sample_seed))
+        if len(attempts) == 1:
+            raise RuntimeError("Spectral radius constraint violated.")
+        return (
+            np.full((row_budget, num_features), 2.0, dtype=np.float32),
+            np.full((row_budget,), 3.0, dtype=np.float32),
+            {
+                "sampled_simulation_clipped": 0,
+                "sampled_simulation_num_attempts": 1,
+                "sampled_simulation_max_abs_value": 1.0,
+                "sampled_train_target_std": 0.5,
+                "sampled_filter_accept": 1,
+            },
+        )
+
+    monkeypatch.setattr(parallel_mod, "_build_single_dynscm_sample_once", fake_once)
+
+    x, y, metadata = parallel_mod.build_single_dynscm_sample(
+        cfg,
+        sample_seed=11,
+        n_train=4,
+        n_test=2,
+        row_budget=8,
+        num_features=6,
+        max_generation_attempts=2,
+    )
+
+    assert len(attempts) == 2
+    assert x.shape == (8, 6)
+    assert y.shape == (8,)
+    assert metadata["sampled_filter_accept"] == 1
+    assert float(x[0, 0]) == 2.0
+    assert float(y[0]) == 3.0
 
 
 def test_feature_priority_truncation_order_is_deterministic(dynscm_api):
