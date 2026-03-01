@@ -21,6 +21,9 @@ Options:
   --machine-type TYPE       Vertex machine type (default: g2-standard-12)
   --accelerator-type TYPE   GPU type (default: NVIDIA_L4)
   --accelerator-count N     GPU count (default: 1)
+  --dynscm-workers N        Live DynSCM generation workers (default: 8)
+  --dynscm-worker-blas-threads N
+                           BLAS threads per DynSCM worker (default: 1)
   --python BIN              Python executable to use locally (default: auto-detect)
   --workdir DIR             Local work directory (default: workdir/research/<run-prefix>)
   --poll-seconds N          Seconds between Vertex job polls (default: 60)
@@ -115,7 +118,9 @@ submit_profile() {
     --research-profile "$profile" \
     -- \
     --loadcheckpoint="$COMMON_WARM_START" \
-    --warm_start
+    --warm_start \
+    --dynscm_workers="$DYNSCM_WORKERS" \
+    --dynscm_worker_blas_threads="$DYNSCM_WORKER_BLAS_THREADS"
 }
 
 wait_for_job() {
@@ -153,6 +158,8 @@ BUCKET_INPUT="${VERTEX_BUCKET:-}"
 MACHINE_TYPE="${VERTEX_MACHINE_TYPE:-g2-standard-12}"
 ACCELERATOR_TYPE="${VERTEX_ACCELERATOR_TYPE:-NVIDIA_L4}"
 ACCELERATOR_COUNT="${VERTEX_ACCELERATOR_COUNT:-1}"
+DYNSCM_WORKERS="${VERTEX_DYNSCM_WORKERS:-8}"
+DYNSCM_WORKER_BLAS_THREADS="${VERTEX_DYNSCM_WORKER_BLAS_THREADS:-1}"
 PYTHON_BIN_OVERRIDE="${PYTHON_BIN:-}"
 PYTHON_CMD=()
 WORK_ROOT=""
@@ -227,6 +234,22 @@ while [[ $# -gt 0 ]]; do
       ACCELERATOR_COUNT="$(require_value --accelerator-count "${1#*=}")"
       shift
       ;;
+    --dynscm-workers)
+      DYNSCM_WORKERS="$(require_value "$1" "${2-}")"
+      shift 2
+      ;;
+    --dynscm-workers=*)
+      DYNSCM_WORKERS="$(require_value --dynscm-workers "${1#*=}")"
+      shift
+      ;;
+    --dynscm-worker-blas-threads)
+      DYNSCM_WORKER_BLAS_THREADS="$(require_value "$1" "${2-}")"
+      shift 2
+      ;;
+    --dynscm-worker-blas-threads=*)
+      DYNSCM_WORKER_BLAS_THREADS="$(require_value --dynscm-worker-blas-threads "${1#*=}")"
+      shift
+      ;;
     --python)
       PYTHON_BIN_OVERRIDE="$(require_value "$1" "${2-}")"
       shift 2
@@ -285,6 +308,14 @@ done
 
 if [[ -z "$GROUP" ]]; then
   echo "Error: --group is required." >&2
+  exit 2
+fi
+if (( DYNSCM_WORKERS < 1 )); then
+  echo "Error: --dynscm-workers must be >= 1." >&2
+  exit 2
+fi
+if (( DYNSCM_WORKER_BLAS_THREADS < 1 )); then
+  echo "Error: --dynscm-worker-blas-threads must be >= 1." >&2
   exit 2
 fi
 if [[ -z "$PROJECT" ]]; then
@@ -383,6 +414,8 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   for profile in "${PROFILES[@]}"; do
     echo "[dry-run] group=${GROUP} profile=${profile} run_name=$(run_name_for_profile "$RUN_PREFIX" "$profile")"
     echo "[dry-run] warm_start_checkpoint=${COMMON_WARM_START}"
+    echo "[dry-run] dynscm_workers=${DYNSCM_WORKERS}"
+    echo "[dry-run] dynscm_worker_blas_threads=${DYNSCM_WORKER_BLAS_THREADS}"
     echo "[dry-run] synthetic_eval=enabled"
     echo "[dry-run] learnability_audit=enabled"
     echo "[dry-run] prior_audit=enabled"
@@ -400,38 +433,63 @@ for profile in "${PROFILES[@]}"; do
   job_resource="$(printf '%s\n' "$submit_output" | tail -n 1)"
   job_id="${job_resource##*/}"
 
+  stream_pid=""
   if [[ "$STREAM_LOGS" -eq 1 ]]; then
-    gcloud ai custom-jobs stream-logs "$job_id" \
-      --project "$PROJECT" \
-      --region "$REGION" || true
+    (
+      gcloud ai custom-jobs stream-logs "$job_id" \
+        --project "$PROJECT" \
+        --region "$REGION" || true
+    ) &
+    stream_pid="$!"
   fi
-  wait_for_job "$profile" "$run_name" "$job_id"
+  if ! wait_for_job "$profile" "$run_name" "$job_id"; then
+    if [[ -n "$stream_pid" ]]; then
+      kill "$stream_pid" >/dev/null 2>&1 || true
+      wait "$stream_pid" >/dev/null 2>&1 || true
+    fi
+    exit 1
+  fi
+  if [[ -n "$stream_pid" ]]; then
+    kill "$stream_pid" >/dev/null 2>&1 || true
+    wait "$stream_pid" >/dev/null 2>&1 || true
+  fi
 
   checkpoint_uri="${BUCKET_PREFIX}/tfm_forecasting/runs/${run_name}/checkpoints/best_checkpoint.pth"
   local_checkpoint="${WORK_ROOT}/artifacts/${profile}.best_checkpoint.pth"
+  printf '[science] local-postprocess profile=%s step=download-checkpoint uri=%s\n' \
+    "$profile" "$checkpoint_uri"
   gcloud storage cp "$checkpoint_uri" "$local_checkpoint" >/dev/null
 
   eval_json="${WORK_ROOT}/eval/${profile}.synthetic_eval.json"
+  printf '[science] local-postprocess profile=%s step=synthetic-eval\n' "$profile"
   "${PYTHON_CMD[@]}" scripts/eval_dynscm_synthetic_suite.py \
     --checkpoint_path "$local_checkpoint" \
     --research_profile "$profile" \
-    --output_json "$eval_json"
+    --output_json "$eval_json" \
+    --dynscm_workers "$DYNSCM_WORKERS" \
+    --dynscm_worker_blas_threads "$DYNSCM_WORKER_BLAS_THREADS"
 
   learnability_audit_json="${WORK_ROOT}/analysis/${profile}.learnability_audit.json"
+  printf '[science] local-postprocess profile=%s step=learnability-audit\n' "$profile"
   "${PYTHON_CMD[@]}" scripts/audit_dynscm_learnability.py \
     --research_profile "$profile" \
     --source train \
-    --json-out "$learnability_audit_json"
+    --json-out "$learnability_audit_json" \
+    --dynscm_workers "$DYNSCM_WORKERS" \
+    --dynscm_worker_blas_threads "$DYNSCM_WORKER_BLAS_THREADS"
 
   prior_audit_json="${WORK_ROOT}/analysis/${profile}.prior_audit.json"
   benchmark_compare_json="${WORK_ROOT}/analysis/${profile}.benchmark_compare.json"
   benchmark_compare_md="${WORK_ROOT}/analysis/${profile}.benchmark_compare.md"
+  printf '[science] local-postprocess profile=%s step=benchmark-compare\n' "$profile"
   "${PYTHON_CMD[@]}" scripts/compare_live_dynscm_profile_to_forecast_benchmark.py \
     --research_profile "$profile" \
     --source train \
     --json-out "$benchmark_compare_json" \
     --markdown-out "$benchmark_compare_md" \
-    --prior-audit-json "$prior_audit_json"
+    --prior-audit-json "$prior_audit_json" \
+    --dynscm_workers "$DYNSCM_WORKERS" \
+    --dynscm_worker_blas_threads "$DYNSCM_WORKER_BLAS_THREADS"
 
   readarray -t metrics < <("${PYTHON_CMD[@]}" - <<PY
 import json
@@ -478,6 +536,7 @@ PY
   decision="pending_review"
   notes="eval+learnability_audit+benchmark_compare complete"
 
+  printf '[science] local-postprocess profile=%s step=append-scorecard\n' "$profile"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$GROUP" "$profile" "$run_name" "$COMMON_WARM_START" "$train_best_val_loss" \
     "$target_eval_loss" "$stable_eval_loss" "$temporal_eval_loss" \

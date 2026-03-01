@@ -102,8 +102,11 @@ def main(argv: list[str] | None = None) -> None:
     test_target_std: list[float] = []
     max_abs_target_value: list[float] = []
     informative_feature_count: list[float] = []
-    target_parent_count: list[float] = []
-    target_self_lag_weight: list[float] = []
+    target_parent_count_native: list[float] = []
+    target_parent_count_final: list[float] = []
+    target_self_lag_weight_native: list[float] = []
+    target_self_lag_weight_final: list[float] = []
+    target_native_lag1_self_edge: list[float] = []
     probe_r2: list[float] = []
     missing_fraction: list[float] = []
     block_missing_fraction: list[float] = []
@@ -152,16 +155,40 @@ def main(argv: list[str] | None = None) -> None:
                 .astype(np.float64)
                 .tolist()
             )
-            target_parent_count.extend(
-                _tensor(batch, "sampled_target_parent_count")
+            target_parent_count_native.extend(
+                _tensor(batch, "sampled_target_parent_count_native")
                 .detach()
                 .cpu()
                 .numpy()
                 .astype(np.float64)
                 .tolist()
             )
-            target_self_lag_weight.extend(
-                _tensor(batch, "sampled_target_self_lag_weight")
+            target_parent_count_final.extend(
+                _tensor(batch, "sampled_target_parent_count_final")
+                .detach()
+                .cpu()
+                .numpy()
+                .astype(np.float64)
+                .tolist()
+            )
+            target_self_lag_weight_native.extend(
+                _tensor(batch, "sampled_target_self_lag_weight_native")
+                .detach()
+                .cpu()
+                .numpy()
+                .astype(np.float64)
+                .tolist()
+            )
+            target_self_lag_weight_final.extend(
+                _tensor(batch, "sampled_target_self_lag_weight_final")
+                .detach()
+                .cpu()
+                .numpy()
+                .astype(np.float64)
+                .tolist()
+            )
+            target_native_lag1_self_edge.extend(
+                _tensor(batch, "sampled_target_native_lag1_self_edge")
                 .detach()
                 .cpu()
                 .numpy()
@@ -283,8 +310,15 @@ def main(argv: list[str] | None = None) -> None:
         "research_profile": profile.name,
         "source": args.source,
         "inspected_tables": len(train_target_std),
+        "native_target_any_lag_parent_fraction": 1.0
+        - _fraction_of(target_parent_count_native, lambda arr: arr <= 0.0),
+        "native_target_lag1_self_edge_fraction": float(
+            np.mean(target_native_lag1_self_edge)
+        )
+        if target_native_lag1_self_edge
+        else 0.0,
         "target_parentless_fraction": _fraction_of(
-            target_parent_count, lambda arr: arr <= 0.0
+            target_parent_count_final, lambda arr: arr <= 0.0
         ),
         "forced_target_lag_fraction": float(np.mean(forced_target_lag))
         if forced_target_lag
@@ -300,7 +334,11 @@ def main(argv: list[str] | None = None) -> None:
         "test_target_std": _stats(test_target_std),
         "max_abs_target_value": _stats(max_abs_target_value),
         "informative_feature_count": _stats(informative_feature_count),
-        "target_self_lag_weight": _stats(target_self_lag_weight),
+        "native_target_parent_count_summary": _stats(target_parent_count_native),
+        "final_target_parent_count_summary": _stats(target_parent_count_final),
+        "native_target_self_lag_weight_summary": _stats(target_self_lag_weight_native),
+        "final_target_self_lag_weight_summary": _stats(target_self_lag_weight_final),
+        "target_self_lag_weight": _stats(target_self_lag_weight_final),
         "missing_fraction": _stats(missing_fraction),
         "block_missing_fraction": _stats(block_missing_fraction),
         "probe_r2": _stats(finite_probe),

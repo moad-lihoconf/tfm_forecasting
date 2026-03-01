@@ -374,14 +374,24 @@ def _build_single_dynscm_sample_once(
         data_mask_slice is not None
         and int(data_mask_slice[1]) > int(data_mask_slice[0])
     )
-    min_target_parent_count = int(
-        np.min(graph_sample.target_lag_parent_counts)
-        if np.all(graph_sample.target_lag_parent_counts >= 0)
+    min_target_parent_count_native = int(
+        np.min(graph_sample.target_lag_parent_counts_native)
+        if np.all(graph_sample.target_lag_parent_counts_native >= 0)
         else 0
     )
-    min_target_self_lag_weight = float(
-        np.min(stability_sample.target_self_lag_weights)
-        if stability_sample.target_self_lag_weights.size > 0
+    min_target_parent_count_final = int(
+        np.min(graph_sample.target_lag_parent_counts_final)
+        if np.all(graph_sample.target_lag_parent_counts_final >= 0)
+        else 0
+    )
+    min_target_self_lag_weight_native = float(
+        np.min(stability_sample.target_self_lag_weights_native)
+        if stability_sample.target_self_lag_weights_native.size > 0
+        else 0.0
+    )
+    min_target_self_lag_weight_final = float(
+        np.min(stability_sample.target_self_lag_weights_final)
+        if stability_sample.target_self_lag_weights_final.size > 0
         else 0.0
     )
 
@@ -419,8 +429,17 @@ def _build_single_dynscm_sample_once(
         "sampled_informative_feature_std_floor": float(
             learnability.informative_feature_std_floor
         ),
-        "sampled_target_parent_count": int(min_target_parent_count),
-        "sampled_target_self_lag_weight": float(min_target_self_lag_weight),
+        "sampled_target_parent_count_native": int(min_target_parent_count_native),
+        "sampled_target_parent_count_final": int(min_target_parent_count_final),
+        "sampled_target_parent_count": int(min_target_parent_count_final),
+        "sampled_target_self_lag_weight_native": float(
+            min_target_self_lag_weight_native
+        ),
+        "sampled_target_self_lag_weight_final": float(min_target_self_lag_weight_final),
+        "sampled_target_self_lag_weight": float(min_target_self_lag_weight_final),
+        "sampled_target_native_lag1_self_edge": int(
+            bool(np.any(graph_sample.target_native_lag1_self_edge))
+        ),
         "sampled_target_had_forced_lag_parent": int(
             bool(np.any(graph_sample.forced_target_lag_parent))
         ),

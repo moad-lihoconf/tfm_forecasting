@@ -115,6 +115,34 @@ def test_spectral_rescale_enabled_in_sampling_enforces_cap(dynscm_api):
     assert np.all(sample.lag_spectral_radii <= cfg.spectral_radius_cap + 1e-6)
 
 
+def test_native_target_self_lag_sampling_avoids_forced_stability_repair(dynscm_api):
+    config_mod, graph_mod, stability_mod = dynscm_api
+    cfg = config_mod.DynSCMConfig.from_dict(
+        {
+            "lagged_sampler_mode": "separated_self_cross",
+            "self_lag_prob": 1.0,
+            "num_regimes": 3,
+            "max_lag": 4,
+            "max_lagged_parents": 2,
+            "col_budget_min": 0.70,
+            "col_budget_max": 0.70,
+            "enforce_target_lagged_parent": True,
+            "force_target_self_lag_if_parentless": True,
+            "target_self_lag_magnitude_min": 0.55,
+            "target_self_lag_magnitude_max": 0.55,
+            "force_positive_self_lag": True,
+            "target_self_lag_min_budget_fraction": 0.10,
+        }
+    )
+
+    graph = graph_mod.sample_regime_graphs(cfg, num_vars=6, target_idx=3, seed=33)
+    sample = stability_mod.sample_stable_coefficients(cfg, graph, target_idx=3, seed=34)
+
+    assert np.all(sample.target_self_lag_weights_native >= 0.55 - 1e-8)
+    assert np.all(sample.target_self_lag_weights_final > 0.0)
+    assert not np.any(sample.forced_target_self_lag)
+
+
 @pytest.mark.parametrize("drift_std", [0.0, 0.05])
 def test_project_after_drift_preserves_guard_a_budgets(dynscm_api, drift_std: float):
     """Scenario coverage: regime-only (0.0) and regime+smooth-drift (>0)."""

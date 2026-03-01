@@ -128,3 +128,37 @@ def test_lag_edges_reference_past_steps_and_match_parent_sets(dynscm_api):
 
             assert actual_lagged == expected_lagged
             assert all(1 <= lag <= sample.max_lag for _, lag in actual_lagged)
+
+
+def test_separated_self_cross_sampler_natively_produces_target_structure(dynscm_api):
+    config_mod, graph_mod = dynscm_api
+    cfg = config_mod.DynSCMConfig.from_dict(
+        {
+            "lagged_sampler_mode": "separated_self_cross",
+            "num_regimes": 3,
+            "max_lag": 4,
+            "max_lagged_parents": 2,
+            "enforce_target_lagged_parent": True,
+            "force_target_self_lag_if_parentless": True,
+            "self_lag_prob": 0.90,
+            "self_lag_decay_rate": 0.10,
+            "base_lagged_edge_prob": 0.45,
+        }
+    )
+
+    sample = graph_mod.sample_regime_graphs(cfg, num_vars=5, target_idx=2, seed=31)
+
+    assert np.all(sample.target_lag_parent_counts_native >= 1)
+    assert np.all(sample.target_native_lag1_self_edge)
+    assert not np.any(sample.forced_target_lag_parent)
+    assert not np.any(sample.forced_target_self_lag)
+
+
+def test_legacy_lag_sampler_mode_remains_available(dynscm_api):
+    config_mod, graph_mod = dynscm_api
+    cfg = config_mod.DynSCMConfig.from_dict({"lagged_sampler_mode": "legacy"})
+
+    sample = graph_mod.sample_regime_graphs(cfg, num_vars=5, target_idx=2, seed=41)
+
+    assert sample.regime_lagged_adjacency.shape == (cfg.num_regimes, cfg.max_lag, 5, 5)
+    assert sample.target_lag_parent_counts_final.shape == (cfg.num_regimes,)

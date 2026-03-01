@@ -29,7 +29,7 @@ COMMON_BATCH_SHARED_FIELDS = (
     "missing_mode",
     "kernel_family",
 )
-SHORT_RESEARCH_HORIZONS = (1, 2, 3)
+SHORT_RESEARCH_HORIZONS = (1, 3)
 EARLY_STAGE_SERIES_LENGTH_MIN = 64
 EARLY_STAGE_SERIES_LENGTH_MAX = 128
 EARLY_STAGE_TEMPORAL_SERIES_LENGTH_MIN = 96
@@ -188,14 +188,31 @@ def _apply_learnability_envelope(
     keep_mask_channels: bool | None = None,
     noise_scale_schedule_tag: str | None = None,
     forecast_horizons_override: tuple[int, ...] | None = SHORT_RESEARCH_HORIZONS,
-    target_self_lag_min_budget_fraction: float = 0.70,
-    target_self_lag_abs_min: float = 0.55,
+    self_lag_prob: float = 0.80,
+    self_lag_decay_rate: float = 0.15,
+    base_lagged_edge_prob: float = 0.40,
+    lagged_parent_rate: float = 1.5,
+    target_self_lag_magnitude_min: float = 0.55,
+    target_self_lag_magnitude_max: float = 0.85,
+    target_self_lag_min_budget_fraction: float = 0.25,
+    target_self_lag_abs_min: float = 0.15,
     col_budget_min: float | None = 0.65,
     col_budget_max: float | None = 0.90,
 ) -> DynSCMConfig:
     overrides: dict[str, object] = {
+        "lagged_sampler_mode": "separated_self_cross",
+        "self_lag_prob": self_lag_prob,
+        "self_lag_decay_rate": self_lag_decay_rate,
+        "base_lagged_edge_prob": base_lagged_edge_prob,
+        "lagged_parent_rate": lagged_parent_rate,
         "enforce_target_lagged_parent": True,
         "force_target_self_lag_if_parentless": True,
+        "target_native_min_lagged_parents": 0,
+        "target_native_self_lag_prob": 0.0,
+        "target_native_self_lag_budget_fraction": None,
+        "target_self_lag_magnitude_min": target_self_lag_magnitude_min,
+        "target_self_lag_magnitude_max": target_self_lag_magnitude_max,
+        "force_positive_self_lag": True,
         "target_self_lag_min_budget_fraction": target_self_lag_min_budget_fraction,
         "target_self_lag_abs_min": target_self_lag_abs_min,
         "disable_mask_channels_when_missing_off": True,
@@ -205,7 +222,6 @@ def _apply_learnability_envelope(
         "min_informative_feature_count": min_informative_feature_count,
         "noise_scale_schedule_tag": noise_scale_schedule_tag,
         # Prefer sparse-but-strong temporal structure over many weak parents.
-        "lagged_parent_rate": min(float(cfg.lagged_parent_rate), 1.0),
         "max_lagged_parents": min(int(cfg.max_lagged_parents), 2),
         "max_contemp_parents": min(int(cfg.max_contemp_parents), 1),
     }
@@ -230,22 +246,36 @@ def _apply_learnability_envelope(
 
 
 def _learnability_filter(
-    *, min_informative_feature_count: int
+    *,
+    min_informative_feature_count: int,
+    min_probe_train_r2: float = 0.02,
+    max_probe_train_r2: float = 0.99,
+    max_missing_fraction: float | None = None,
+    max_block_missing_fraction: float | None = None,
 ) -> DynSCMSampleFilterConfig:
     return DynSCMSampleFilterConfig(
         reject_clipped=True,
         max_abs_value_cap=1000.0,
         min_train_target_std=1e-3,
-        min_probe_train_r2=0.02,
-        max_probe_train_r2=0.99,
+        min_probe_train_r2=min_probe_train_r2,
+        max_probe_train_r2=max_probe_train_r2,
         min_informative_feature_count=min_informative_feature_count,
         informative_feature_std_floor=1e-3,
+        max_missing_fraction=max_missing_fraction,
+        max_block_missing_fraction=max_block_missing_fraction,
     )
 
 
 @lru_cache(maxsize=1)
 def stable_learnable_cfg() -> DynSCMConfig:
-    return _apply_learnability_envelope(stable_cfg(), min_informative_feature_count=10)
+    return _apply_learnability_envelope(
+        stable_cfg(),
+        min_informative_feature_count=10,
+        self_lag_prob=0.90,
+        self_lag_decay_rate=0.10,
+        base_lagged_edge_prob=0.45,
+        lagged_parent_rate=1.5,
+    )
 
 
 @lru_cache(maxsize=1)
@@ -264,8 +294,10 @@ def full_learnable_cfg() -> DynSCMConfig:
         min_informative_feature_count=10,
         normal_noise_only=True,
         noise_scale_schedule_tag="benchmark_contract_scale_up",
-        target_self_lag_min_budget_fraction=0.40,
-        target_self_lag_abs_min=0.20,
+        target_self_lag_magnitude_min=0.50,
+        target_self_lag_magnitude_max=0.78,
+        target_self_lag_min_budget_fraction=0.20,
+        target_self_lag_abs_min=0.10,
         col_budget_min=None,
         col_budget_max=None,
     )
@@ -362,7 +394,7 @@ def _benchmark_contract_base_cfg() -> DynSCMConfig:
             train_rows_max=32,
             test_rows_min=16,
             test_rows_max=16,
-            forecast_horizons=(1, 3, 6, 12),
+            forecast_horizons=SHORT_RESEARCH_HORIZONS,
             explicit_lags=(0, 1, 2, 5, 10),
             num_kernels=3,
             max_feature_lag=32,
@@ -397,6 +429,10 @@ def _benchmark_contract_base_cfg() -> DynSCMConfig:
         keep_mask_channels=False,
         noise_scale_schedule_tag="benchmark_contract_scale_up",
         forecast_horizons_override=None,
+        self_lag_prob=0.90,
+        self_lag_decay_rate=0.10,
+        base_lagged_edge_prob=0.45,
+        lagged_parent_rate=1.5,
     )
 
 
@@ -426,6 +462,18 @@ def _guardrailed(cfg: DynSCMConfig) -> DynSCMConfig:
     return cfg.with_overrides(enable_spectral_rescale=True, spectral_radius_cap=0.90)
 
 
+@lru_cache(maxsize=1)
+def mode_ladder_train_cfg() -> DynSCMConfig:
+    return _guardrailed(
+        target_learnable_cfg().with_overrides(
+            target_self_lag_magnitude_min=0.50,
+            target_self_lag_magnitude_max=0.78,
+            target_self_lag_min_budget_fraction=0.15,
+            target_self_lag_abs_min=0.10,
+        )
+    )
+
+
 def _preserve_guardrail_strategy(
     source_cfg: DynSCMConfig | None,
     replacement_cfg: DynSCMConfig,
@@ -442,6 +490,16 @@ def _preserve_guardrail_strategy(
 
 def _guardrail_filter() -> DynSCMSampleFilterConfig:
     return _learnability_filter(min_informative_feature_count=10)
+
+
+def _mode_ladder_filter() -> DynSCMSampleFilterConfig:
+    return _learnability_filter(
+        min_informative_feature_count=10,
+        min_probe_train_r2=0.08,
+        max_probe_train_r2=0.95,
+        max_missing_fraction=0.18,
+        max_block_missing_fraction=0.12,
+    )
 
 
 def _eval_suites() -> tuple[SyntheticEvalSuiteSpec, ...]:
@@ -574,18 +632,23 @@ def _mode_ladder_modes() -> tuple[DynSCMBatchMode, ...]:
             name="noise_only",
             cfg_overrides={
                 **easy_graph_overrides,
-                "noise_family": "student_t",
-                "noise_family_choices": ("normal", "student_t"),
-                "noise_family_probs": (0.8, 0.2),
+                "noise_family": "normal",
+                "noise_family_choices": None,
+                "noise_family_probs": None,
+                "noise_scale_min": 0.12,
+                "noise_scale_max": 0.24,
             },
         ),
         DynSCMBatchMode(
             name="missing_only",
             cfg_overrides={
                 **easy_non_noise_overrides,
-                "missing_mode": "mix",
+                "missing_mode": "mcar",
                 "missing_mode_choices": ("off", "mcar"),
-                "missing_mode_probs": (0.8, 0.2),
+                "missing_mode_probs": (0.9, 0.1),
+                "missing_rate_min": 0.02,
+                "missing_rate_max": 0.08,
+                "block_missing_prob": 0.0,
             },
         ),
         DynSCMBatchMode(
@@ -616,9 +679,9 @@ def _mode_ladder_modes() -> tuple[DynSCMBatchMode, ...]:
 def _mode_ladder_schedule() -> LinearPhaseSchedule:
     return LinearPhaseSchedule(
         [
-            (0.5, (0.25, 0.25, 0.25, 0.25, 0.0), None),
-            (0.8, (0.25, 0.25, 0.25, 0.25, 0.0), (0.175, 0.175, 0.175, 0.175, 0.30)),
-            (1.0, (0.175, 0.175, 0.175, 0.175, 0.30), (0.10, 0.10, 0.10, 0.10, 0.60)),
+            (0.5, (0.40, 0.05, 0.05, 0.50, 0.0), None),
+            (0.8, (0.40, 0.05, 0.05, 0.50, 0.0), (0.22, 0.08, 0.08, 0.32, 0.30)),
+            (1.0, (0.22, 0.08, 0.08, 0.32, 0.30), (0.12, 0.06, 0.06, 0.21, 0.55)),
         ]
     )
 
@@ -651,6 +714,7 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
         )
     )
     common_filter = _guardrail_filter()
+    mode_ladder_filter = _mode_ladder_filter()
 
     baseline = DynSCMLiveResearchProfile(
         name="medium32k_live_baseline",
@@ -699,8 +763,8 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
         name="medium32k_live_mode_ladder",
         train_source=LiveSourceSpec(
             kind="mode_ladder",
-            cfg=target_guardrailed,
-            sample_filter=common_filter,
+            cfg=mode_ladder_train_cfg(),
+            sample_filter=mode_ladder_filter,
             max_sample_attempts_per_item=GUARDRAIL_MAX_SAMPLE_ATTEMPTS,
             batch_shared_fields=COMMON_BATCH_SHARED_FIELDS,
             modes=_mode_ladder_modes(),

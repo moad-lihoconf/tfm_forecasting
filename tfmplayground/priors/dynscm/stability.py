@@ -20,7 +20,12 @@ class DynSCMStabilitySample:
     contemp_column_budgets: np.ndarray  # (K, p), per-target budgets for cont. edges.
     spectral_rescale_factors: np.ndarray  # (K,), multiplicative lag rescale factors.
     lag_spectral_radii: np.ndarray  # (K,), spectral radius diagnostics (or NaN).
-    target_self_lag_weights: np.ndarray  # (K,), realized lag-1 target self-lag weights.
+    target_self_lag_weights_native: (
+        np.ndarray
+    )  # (K,), pre-fallback lag-1 target self-lag weights.
+    target_self_lag_weights_final: (
+        np.ndarray
+    )  # (K,), realized lag-1 target self-lag weights.
     forced_target_self_lag: np.ndarray  # (K,), whether self-lag was explicitly raised.
 
     @property
@@ -34,6 +39,10 @@ class DynSCMStabilitySample:
     @property
     def num_vars(self) -> int:
         return self.lag_coeffs.shape[2]
+
+    @property
+    def target_self_lag_weights(self) -> np.ndarray:
+        return self.target_self_lag_weights_final
 
 
 def sample_stable_coefficients(
@@ -55,7 +64,8 @@ def sample_stable_coefficients(
     contemp_column_budgets = np.zeros((num_regimes, num_vars), dtype=np.float64)
     spectral_rescale_factors = np.ones((num_regimes,), dtype=np.float64)
     lag_spectral_radii = np.full((num_regimes,), np.nan, dtype=np.float64)
-    target_self_lag_weights = np.zeros((num_regimes,), dtype=np.float64)
+    target_self_lag_weights_native = np.zeros((num_regimes,), dtype=np.float64)
+    target_self_lag_weights_final = np.zeros((num_regimes,), dtype=np.float64)
     forced_target_self_lag = np.zeros((num_regimes,), dtype=bool)
     compute_spectral_diagnostics = (
         cfg.compute_spectral_diagnostics or cfg.enable_spectral_rescale
@@ -78,6 +88,15 @@ def sample_stable_coefficients(
             rng=rng,
         )
         if target_idx is not None:
+            lag_block, native_self_weight = _apply_target_native_self_lag(
+                cfg=cfg,
+                lag_coeffs=lag_block,
+                edge_mask=lag_mask,
+                target_budget=float(lag_budget[int(target_idx)]),
+                target_idx=int(target_idx),
+                rng=rng,
+            )
+            target_self_lag_weights_native[regime_idx] = native_self_weight
             lag_block, forced_self = _enforce_target_self_lag(
                 cfg=cfg,
                 lag_coeffs=lag_block,
@@ -107,7 +126,7 @@ def sample_stable_coefficients(
         lag_column_budgets[regime_idx] = lag_budget
         contemp_column_budgets[regime_idx] = cont_budget
         if target_idx is not None:
-            target_self_lag_weights[regime_idx] = float(
+            target_self_lag_weights_final[regime_idx] = float(
                 abs(lag_block[0, int(target_idx), int(target_idx)])
             )
 
@@ -128,7 +147,8 @@ def sample_stable_coefficients(
         contemp_column_budgets=contemp_column_budgets,
         spectral_rescale_factors=spectral_rescale_factors,
         lag_spectral_radii=lag_spectral_radii,
-        target_self_lag_weights=target_self_lag_weights,
+        target_self_lag_weights_native=target_self_lag_weights_native,
+        target_self_lag_weights_final=target_self_lag_weights_final,
         forced_target_self_lag=forced_target_self_lag,
     )
 
@@ -240,6 +260,59 @@ def _enforce_target_self_lag(
     return output, True
 
 
+def _apply_target_native_self_lag(
+    *,
+    cfg: DynSCMConfig,
+    lag_coeffs: np.ndarray,
+    edge_mask: np.ndarray,
+    target_budget: float,
+    target_idx: int,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, float]:
+    output = lag_coeffs.astype(np.float64, copy=True)
+    current = float(abs(output[0, target_idx, target_idx]))
+    desired_min = cfg.target_self_lag_magnitude_min
+    desired_max = cfg.target_self_lag_magnitude_max
+    if desired_min is None or desired_max is None or target_budget <= 0.0:
+        return output, current
+    if not bool(edge_mask[0, target_idx, target_idx]):
+        return output, current
+
+    desired = min(target_budget, float(rng.uniform(desired_min, desired_max)))
+    if desired <= 0.0:
+        return output, current
+
+    other_active = np.argwhere(edge_mask[:, :, target_idx])
+    donor_mask = [
+        (int(block_idx), int(source_idx))
+        for block_idx, source_idx in other_active.tolist()
+        if not (int(block_idx) == 0 and int(source_idx) == target_idx)
+    ]
+    available = float(
+        sum(
+            abs(output[block_idx, source_idx, target_idx])
+            for block_idx, source_idx in donor_mask
+        )
+    )
+    remaining = max(0.0, target_budget - desired)
+    if available > 0.0:
+        scale = remaining / available
+        for block_idx, source_idx in donor_mask:
+            output[block_idx, source_idx, target_idx] *= scale
+    else:
+        for block_idx, source_idx in donor_mask:
+            output[block_idx, source_idx, target_idx] = 0.0
+    output[0, target_idx, target_idx] = desired
+    if cfg.force_positive_self_lag:
+        output[0, target_idx, target_idx] = abs(output[0, target_idx, target_idx])
+    target_l1 = float(np.sum(np.abs(output[:, :, target_idx])))
+    if target_l1 > target_budget + 1e-12:
+        output[:, :, target_idx] *= target_budget / max(target_l1, 1e-12)
+    if cfg.force_positive_self_lag:
+        output[0, target_idx, target_idx] = abs(output[0, target_idx, target_idx])
+    return output, float(abs(output[0, target_idx, target_idx]))
+
+
 def project_to_column_budgets(
     lag_coeffs: np.ndarray,
     target_budgets: np.ndarray,
@@ -320,8 +393,9 @@ def rescale_lag_block_to_spectral_radius(
         if rho <= spectral_radius_cap:
             return scaled, factor, rho
 
-    # Final fallback step if numerical noise prevented convergence in the loop.
-    factor *= min(step_ceiling, spectral_radius_cap / (rho + 1e-12))
+    # Final fallback uses an exact one-shot projection to the cap if iterative
+    # damping with a step ceiling did not converge within max_iter.
+    factor *= spectral_radius_cap / (rho + 1e-12)
     scaled = lag_coeffs * factor
     rho = companion_spectral_radius(scaled)
     return scaled, factor, rho

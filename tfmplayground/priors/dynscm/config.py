@@ -143,6 +143,7 @@ class DynSCMRegimeConfig(_FrozenConfigModel):
 class DynSCMGraphConfig(_FrozenConfigModel):
     """Graph sparsity and temporal dynamics knobs."""
 
+    lagged_sampler_mode: Literal["legacy", "separated_self_cross"] = "legacy"
     use_contemp_edges: bool = True
     max_contemp_parents: int = Field(default=3, ge=0)
     max_lagged_parents: int = Field(default=2, ge=0)
@@ -150,6 +151,8 @@ class DynSCMGraphConfig(_FrozenConfigModel):
     lagged_parent_rate: float = Field(default=1.5, ge=0.0)
     base_lagged_edge_prob: float = Field(default=0.25, ge=0.0, le=1.0)
     lagged_edge_decay_rate: float = Field(default=0.35, ge=0.0)
+    self_lag_prob: float = Field(default=0.85, ge=0.0, le=1.0)
+    self_lag_decay_rate: float = Field(default=0.15, ge=0.0)
     contemp_edge_add_prob: float = Field(default=0.02, ge=0.0, le=1.0)
     contemp_edge_del_prob: float = Field(default=0.02, ge=0.0, le=1.0)
     lagged_edge_add_prob: float = Field(default=0.03, ge=0.0, le=1.0)
@@ -195,11 +198,33 @@ class DynSCMStabilityConfig(_FrozenConfigModel):
     enable_spectral_rescale: bool = False
     compute_spectral_diagnostics: bool = False
     spectral_radius_cap: float = Field(default=0.95, gt=0.0, lt=1.0)
+    target_self_lag_magnitude_min: float | None = Field(default=None, ge=0.0, lt=1.0)
+    target_self_lag_magnitude_max: float | None = Field(default=None, ge=0.0, lt=1.0)
+    force_positive_self_lag: bool = False
 
     @model_validator(mode="after")
     def _cross_validate(self) -> DynSCMStabilityConfig:
+        errors = []
         if self.col_budget_min > self.col_budget_max:
-            raise ValueError("col_budget_min must be <= col_budget_max.")
+            errors.append("col_budget_min must be <= col_budget_max.")
+        if (self.target_self_lag_magnitude_min is None) != (
+            self.target_self_lag_magnitude_max is None
+        ):
+            errors.append(
+                "target_self_lag_magnitude_min and "
+                "target_self_lag_magnitude_max must both be provided or both omitted."
+            )
+        if (
+            self.target_self_lag_magnitude_min is not None
+            and self.target_self_lag_magnitude_max is not None
+            and self.target_self_lag_magnitude_min > self.target_self_lag_magnitude_max
+        ):
+            errors.append(
+                "target_self_lag_magnitude_min must be <= "
+                "target_self_lag_magnitude_max."
+            )
+        if errors:
+            raise ValueError("\n".join(errors))
         return self
 
 
@@ -348,6 +373,9 @@ class DynSCMResearchConfig(_FrozenConfigModel):
     enforce_target_lagged_parent: bool = False
     enforce_all_nodes_lagged_parent: bool = False
     force_target_self_lag_if_parentless: bool = False
+    target_native_min_lagged_parents: int = Field(default=0, ge=0)
+    target_native_self_lag_prob: float = Field(default=0.0, ge=0.0, le=1.0)
+    target_native_self_lag_budget_fraction: float | None = Field(default=None, ge=0.0)
     target_self_lag_min_budget_fraction: float | None = Field(default=None, ge=0.0)
     target_self_lag_abs_min: float | None = Field(default=None, ge=0.0)
     disable_mask_channels_when_missing_off: bool = True
@@ -361,11 +389,28 @@ class DynSCMResearchConfig(_FrozenConfigModel):
     def _cross_validate(self) -> DynSCMResearchConfig:
         errors = []
         if (
+            self.target_native_self_lag_budget_fraction is not None
+            and self.target_native_self_lag_budget_fraction > 1.0
+        ):
+            errors.append(
+                "target_native_self_lag_budget_fraction must be <= 1.0 when set."
+            )
+        if (
             self.target_self_lag_min_budget_fraction is not None
             and self.target_self_lag_min_budget_fraction > 1.0
         ):
             errors.append(
                 "target_self_lag_min_budget_fraction must be <= 1.0 when set."
+            )
+        if (
+            self.target_native_self_lag_budget_fraction is not None
+            and self.target_self_lag_min_budget_fraction is not None
+            and self.target_native_self_lag_budget_fraction
+            > self.target_self_lag_min_budget_fraction
+        ):
+            errors.append(
+                "target_native_self_lag_budget_fraction must be <= "
+                "target_self_lag_min_budget_fraction when both are set."
             )
         if (
             self.min_informative_feature_count is not None

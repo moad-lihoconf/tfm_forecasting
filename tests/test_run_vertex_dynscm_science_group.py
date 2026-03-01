@@ -71,6 +71,8 @@ def test_run_vertex_dynscm_science_group_dry_run_temporal(tmp_path: Path) -> Non
     )
     assert stdout.count("learnability_audit=enabled") == 6
     assert stdout.count("benchmark_compare=enabled") == 6
+    assert stdout.count("dynscm_workers=8") == 6
+    assert stdout.count("dynscm_worker_blas_threads=1") == 6
 
 
 def test_run_vertex_dynscm_science_group_dry_run_benchmark(tmp_path: Path) -> None:
@@ -148,3 +150,39 @@ def test_run_vertex_dynscm_science_group_dry_run_normalization(tmp_path: Path) -
         "[dry-run] group=normalization_ablation profile=mode_ladder_norm_clamped"
         in stdout
     )
+
+
+def test_run_vertex_dynscm_science_group_dry_run_allows_worker_overrides(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    _write_fake_gcloud(bin_dir)
+
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    completed = subprocess.run(
+        [
+            "bash",
+            "scripts/run_vertex_dynscm_science_group.sh",
+            "--group",
+            "generator_learnability",
+            "--run-prefix",
+            "science-test",
+            "--dynscm-workers",
+            "6",
+            "--dynscm-worker-blas-threads",
+            "2",
+            "--dry-run",
+        ],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    stdout = completed.stdout
+    assert stdout.count("dynscm_workers=6") == 3
+    assert stdout.count("dynscm_worker_blas_threads=2") == 3

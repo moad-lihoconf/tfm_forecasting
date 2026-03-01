@@ -37,7 +37,9 @@ class DynSCMGraphSample:
     regime_parent_sets: ParentsByRegime
     forced_target_lag_parent: npt.NDArray[np.bool_]
     forced_target_self_lag: npt.NDArray[np.bool_]
-    target_lag_parent_counts: npt.NDArray[np.int64]
+    target_lag_parent_counts_native: npt.NDArray[np.int64]
+    target_lag_parent_counts_final: npt.NDArray[np.int64]
+    target_native_lag1_self_edge: npt.NDArray[np.bool_]
 
     @property
     def num_regimes(self) -> int:
@@ -50,6 +52,10 @@ class DynSCMGraphSample:
     @property
     def max_lag(self) -> int:
         return self.regime_lagged_adjacency.shape[1]
+
+    @property
+    def target_lag_parent_counts(self) -> npt.NDArray[np.int64]:
+        return self.target_lag_parent_counts_final
 
 
 def sample_regime_graphs(
@@ -85,12 +91,14 @@ def sample_regime_graphs(
         rng=rng,
     )
     base_lagged_adjacency = _sample_lagged(
+        cfg=cfg,
         num_vars=num_vars,
         max_lag=cfg.max_lag,
         parent_rate=cfg.lagged_parent_rate,
         edge_decay_rate=cfg.lagged_edge_decay_rate,
         base_edge_prob=cfg.base_lagged_edge_prob,
         max_parents=cfg.max_lagged_parents,
+        target_idx=target_idx,
         rng=rng,
     )
 
@@ -102,7 +110,9 @@ def sample_regime_graphs(
     )
     forced_target_lag_parent = np.zeros((cfg.num_regimes,), dtype=bool)
     forced_target_self_lag = np.zeros((cfg.num_regimes,), dtype=bool)
-    target_lag_parent_counts = np.full((cfg.num_regimes,), -1, dtype=np.int64)
+    target_lag_parent_counts_native = np.full((cfg.num_regimes,), -1, dtype=np.int64)
+    target_lag_parent_counts_final = np.full((cfg.num_regimes,), -1, dtype=np.int64)
+    target_native_lag1_self_edge = np.zeros((cfg.num_regimes,), dtype=bool)
 
     for regime_idx in range(cfg.num_regimes):
         regime_topological_order = regime_topo_orders[regime_idx]
@@ -120,12 +130,14 @@ def sample_regime_graphs(
                 rng=rng,
             )
             regime_lagged = _sample_lagged(
+                cfg=cfg,
                 num_vars=num_vars,
                 max_lag=cfg.max_lag,
                 parent_rate=cfg.lagged_parent_rate,
                 edge_decay_rate=cfg.lagged_edge_decay_rate,
                 base_edge_prob=cfg.base_lagged_edge_prob,
                 max_parents=cfg.max_lagged_parents,
+                target_idx=target_idx,
                 rng=rng,
             )
 
@@ -139,12 +151,20 @@ def sample_regime_graphs(
             rng=rng,
         )
         regime_lagged = _flip_lagged(
+            cfg=cfg,
             lagged=regime_lagged,
             edge_add_prob=cfg.lagged_edge_add_prob,
             edge_del_prob=cfg.lagged_edge_del_prob,
             max_parents=cfg.max_lagged_parents,
             rng=rng,
         )
+        if target_idx is not None:
+            target_lag_parent_counts_native[regime_idx] = int(
+                np.sum(regime_lagged[:, :, target_idx])
+            )
+            target_native_lag1_self_edge[regime_idx] = bool(
+                regime_lagged[0, int(target_idx), int(target_idx)]
+            )
         (
             regime_lagged,
             forced_target_parent,
@@ -161,7 +181,7 @@ def sample_regime_graphs(
         forced_target_lag_parent[regime_idx] = forced_target_parent
         forced_target_self_lag[regime_idx] = forced_target_self
         if target_idx is not None:
-            target_lag_parent_counts[regime_idx] = int(
+            target_lag_parent_counts_final[regime_idx] = int(
                 np.sum(regime_lagged[:, :, target_idx])
             )
 
@@ -188,7 +208,9 @@ def sample_regime_graphs(
         regime_parent_sets=regime_parent_sets,
         forced_target_lag_parent=forced_target_lag_parent,
         forced_target_self_lag=forced_target_self_lag,
-        target_lag_parent_counts=target_lag_parent_counts,
+        target_lag_parent_counts_native=target_lag_parent_counts_native,
+        target_lag_parent_counts_final=target_lag_parent_counts_final,
+        target_native_lag1_self_edge=target_native_lag1_self_edge,
     )
 
 
@@ -255,12 +277,51 @@ def _sample_contemporaneous(
 
 def _sample_lagged(
     *,
+    cfg: DynSCMConfig,
     num_vars: int,
     max_lag: int,
     parent_rate: float,
     edge_decay_rate: float,
     base_edge_prob: float,
     max_parents: int,
+    target_idx: int | None,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    if cfg.lagged_sampler_mode == "separated_self_cross":
+        return _sample_lagged_separated_self_cross(
+            cfg=cfg,
+            num_vars=num_vars,
+            max_lag=max_lag,
+            parent_rate=parent_rate,
+            edge_decay_rate=edge_decay_rate,
+            base_edge_prob=base_edge_prob,
+            max_parents=max_parents,
+            rng=rng,
+        )
+
+    return _sample_lagged_legacy(
+        cfg=cfg,
+        num_vars=num_vars,
+        max_lag=max_lag,
+        parent_rate=parent_rate,
+        edge_decay_rate=edge_decay_rate,
+        base_edge_prob=base_edge_prob,
+        max_parents=max_parents,
+        target_idx=target_idx,
+        rng=rng,
+    )
+
+
+def _sample_lagged_legacy(
+    *,
+    cfg: DynSCMConfig,
+    num_vars: int,
+    max_lag: int,
+    parent_rate: float,
+    edge_decay_rate: float,
+    base_edge_prob: float,
+    max_parents: int,
+    target_idx: int | None,
     rng: np.random.Generator,
 ) -> np.ndarray:
     lagged = np.zeros((max_lag, num_vars, num_vars), dtype=bool)
@@ -288,7 +349,133 @@ def _sample_lagged(
             parents = rng.choice(candidates, size=selected_count, replace=False)
             lagged[lag_idx, parents, target] = True
 
+    _bias_target_lagged_sampling(
+        cfg=cfg,
+        lagged=lagged,
+        target_idx=target_idx,
+        max_parents=max_parents,
+        edge_decay_rate=edge_decay_rate,
+        rng=rng,
+    )
     return lagged
+
+
+def _sample_lagged_separated_self_cross(
+    *,
+    cfg: DynSCMConfig,
+    num_vars: int,
+    max_lag: int,
+    parent_rate: float,
+    edge_decay_rate: float,
+    base_edge_prob: float,
+    max_parents: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    lagged = np.zeros((max_lag, num_vars, num_vars), dtype=bool)
+    if max_parents == 0:
+        return lagged
+
+    all_sources = np.arange(num_vars, dtype=np.int64)
+
+    for lag_idx in range(max_lag):
+        self_prob = float(
+            cfg.self_lag_prob * np.exp(-cfg.self_lag_decay_rate * lag_idx)
+        )
+        if self_prob > 0.0:
+            sampled_self = rng.random(num_vars) < min(1.0, self_prob)
+            for node in np.flatnonzero(sampled_self):
+                lagged[lag_idx, int(node), int(node)] = True
+
+    for lag_idx in range(max_lag):
+        decay = float(np.exp(-edge_decay_rate * lag_idx))
+        lam = parent_rate * decay
+        edge_prob = min(1.0, base_edge_prob * decay)
+
+        for target in range(num_vars):
+            has_self = bool(lagged[lag_idx, target, target])
+            max_cross_parents = max(0, min(max_parents - int(has_self), num_vars - 1))
+            if max_cross_parents == 0:
+                continue
+
+            parent_count = _sample_truncated_poisson(rng, lam, max_cross_parents)
+            if parent_count == 0:
+                continue
+
+            cross_sources = np.concatenate(
+                (all_sources[:target], all_sources[target + 1 :])
+            )
+            sampled_mask = rng.random(cross_sources.size) < edge_prob
+            candidates = cross_sources[sampled_mask]
+            if candidates.size == 0:
+                continue
+
+            selected_count = min(parent_count, candidates.size)
+            parents = rng.choice(candidates, size=selected_count, replace=False)
+            lagged[lag_idx, parents, target] = True
+
+    return lagged
+
+
+def _bias_target_lagged_sampling(
+    *,
+    cfg: DynSCMConfig,
+    lagged: np.ndarray,
+    target_idx: int | None,
+    max_parents: int,
+    edge_decay_rate: float,
+    rng: np.random.Generator,
+) -> None:
+    if target_idx is None or max_parents == 0:
+        return
+
+    target = int(target_idx)
+    num_lags, num_vars, _ = lagged.shape
+
+    if cfg.target_native_self_lag_prob > 0.0 and rng.random() < float(
+        cfg.target_native_self_lag_prob
+    ):
+        lagged[0, target, target] = True
+
+    min_target_parents = int(cfg.target_native_min_lagged_parents)
+    if min_target_parents <= 0:
+        return
+
+    lag_weights = np.exp(
+        -float(edge_decay_rate) * np.arange(num_lags, dtype=np.float64)
+    )
+    if float(lag_weights.sum()) <= 0.0:
+        lag_weights = np.ones((num_lags,), dtype=np.float64)
+    lag_weights = lag_weights / lag_weights.sum()
+
+    while int(np.sum(lagged[:, :, target])) < min_target_parents:
+        candidate_slots: list[tuple[int, int, float]] = []
+        for lag_idx in range(num_lags):
+            current_parent_count = int(np.sum(lagged[lag_idx, :, target]))
+            if current_parent_count >= max_parents:
+                continue
+            for source in range(num_vars):
+                if lagged[lag_idx, source, target]:
+                    continue
+                weight = float(lag_weights[lag_idx])
+                if lag_idx == 0 and source == target:
+                    weight *= 2.0
+                candidate_slots.append((lag_idx, source, weight))
+
+        if not candidate_slots:
+            break
+
+        probs = np.asarray(
+            [weight for _, _, weight in candidate_slots], dtype=np.float64
+        )
+        if float(probs.sum()) <= 0.0:
+            probs = np.full((len(candidate_slots),), 1.0 / len(candidate_slots))
+        else:
+            probs = probs / probs.sum()
+        slot_idx = int(
+            rng.choice(np.arange(len(candidate_slots), dtype=np.int64), p=probs)
+        )
+        lag_idx, source, _ = candidate_slots[slot_idx]
+        lagged[lag_idx, source, target] = True
 
 
 def _flip_contemporaneous(
@@ -337,6 +524,7 @@ def _flip_contemporaneous(
 
 def _flip_lagged(
     *,
+    cfg: DynSCMConfig,
     lagged: np.ndarray,
     edge_add_prob: float,
     edge_del_prob: float,
@@ -350,10 +538,15 @@ def _flip_lagged(
     num_lags, num_vars, _ = output.shape
     for lag_idx in range(num_lags):
         matrix = output[lag_idx]
-        delete_mask = (rng.random(matrix.shape) < edge_del_prob) & matrix
+        mutable_mask = np.ones_like(matrix, dtype=bool)
+        if cfg.lagged_sampler_mode == "separated_self_cross":
+            np.fill_diagonal(mutable_mask, False)
+        delete_mask = (rng.random(matrix.shape) < edge_del_prob) & matrix & mutable_mask
         matrix[delete_mask] = False
 
         add_candidates = ~matrix
+        if cfg.lagged_sampler_mode == "separated_self_cross":
+            add_candidates &= mutable_mask
         add_mask = (rng.random(matrix.shape) < edge_add_prob) & add_candidates
         matrix[add_mask] = True
 
@@ -361,7 +554,30 @@ def _flip_lagged(
             incoming = np.flatnonzero(matrix[:, target])
             if incoming.size <= max_parents:
                 continue
-            keep = set(rng.choice(incoming, size=max_parents, replace=False).tolist())
+            if cfg.lagged_sampler_mode == "separated_self_cross" and target in incoming:
+                keep: set[int] = {int(target)}
+                remaining = np.asarray(
+                    [source for source in incoming.tolist() if int(source) != target],
+                    dtype=np.int64,
+                )
+                remaining_keep = max(0, max_parents - 1)
+                if remaining.size > remaining_keep:
+                    keep.update(
+                        map(
+                            int,
+                            rng.choice(
+                                remaining,
+                                size=remaining_keep,
+                                replace=False,
+                            ).tolist(),
+                        )
+                    )
+                else:
+                    keep.update(map(int, remaining.tolist()))
+            else:
+                keep = set(
+                    rng.choice(incoming, size=max_parents, replace=False).tolist()
+                )
             for source in incoming:
                 if source not in keep:
                     matrix[source, target] = False

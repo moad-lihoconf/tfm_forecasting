@@ -36,8 +36,13 @@ _RICHNESS_METADATA_KEYS = {
     "sampled_probe_r2",
     "sampled_informative_feature_count",
     "sampled_informative_feature_std_floor",
+    "sampled_target_parent_count_native",
+    "sampled_target_parent_count_final",
     "sampled_target_parent_count",
+    "sampled_target_self_lag_weight_native",
+    "sampled_target_self_lag_weight_final",
     "sampled_target_self_lag_weight",
+    "sampled_target_native_lag1_self_edge",
     "sampled_target_had_forced_lag_parent",
     "sampled_target_had_forced_self_lag",
     "sampled_mask_channels_enabled",
@@ -213,8 +218,8 @@ def test_make_get_batch_dynscm_enforces_target_lag_and_mask_gating(dynscm_api):
     finally:
         _close_if_supported(get_batch)
 
-    assert torch.all(batch["sampled_target_parent_count"] >= 1)
-    assert torch.all(batch["sampled_target_self_lag_weight"] > 0)
+    assert torch.all(batch["sampled_target_parent_count_final"] >= 1)
+    assert torch.all(batch["sampled_target_self_lag_weight_final"] > 0)
     assert torch.all(batch["sampled_mask_channels_enabled"] == 0)
 
 

@@ -132,7 +132,7 @@ def test_benchmark_contract_profiles_match_benchmark_shape_contract(
         assert cfg.train_rows_max == 32
         assert cfg.test_rows_min == 16
         assert cfg.test_rows_max == 16
-        assert cfg.forecast_horizons == (1, 3, 6, 12)
+        assert cfg.forecast_horizons == (1, 3)
         assert cfg.explicit_lags == (0, 1, 2, 5, 10)
         assert cfg.num_kernels == 3
         assert cfg.add_mask_channels is False
@@ -157,22 +157,9 @@ def test_revised_research_profiles_use_only_short_horizons(priors_modules) -> No
     ):
         profile = profiles_mod.get_research_profile(name)
         if profile.train_source.cfg is not None:
-            assert profile.train_source.cfg.forecast_horizons == (1, 2, 3)
+            assert profile.train_source.cfg.forecast_horizons == (1, 3)
         if profile.val_source.cfg is not None:
-            assert profile.val_source.cfg.forecast_horizons == (1, 2, 3)
-
-
-def test_benchmark_contract_profiles_preserve_eval_horizons(priors_modules) -> None:
-    profiles_mod = priors_modules["research_profiles"]
-    for name in (
-        "benchmark_contract_observed_easy",
-        "benchmark_contract_observed_temporal",
-    ):
-        profile = profiles_mod.get_research_profile(name)
-        assert profile.train_source.cfg is not None
-        assert profile.val_source.cfg is not None
-        assert profile.train_source.cfg.forecast_horizons == (1, 3, 6, 12)
-        assert profile.val_source.cfg.forecast_horizons == (1, 3, 6, 12)
+            assert profile.val_source.cfg.forecast_horizons == (1, 3)
 
 
 def test_temporal_profiles_use_shorter_common_budget(priors_modules) -> None:
@@ -181,6 +168,33 @@ def test_temporal_profiles_use_shorter_common_budget(priors_modules) -> None:
         profile = profiles_mod.get_research_profile(name)
         assert profile.training_budget.epochs == 12
         assert profile.training_budget.steps == 400
+
+
+def test_target_learnable_cfg_uses_native_separated_sampler(priors_modules) -> None:
+    profiles_mod = priors_modules["research_profiles"]
+    cfg = profiles_mod.target_learnable_cfg()
+
+    assert cfg.lagged_sampler_mode == "separated_self_cross"
+    assert cfg.self_lag_prob == 0.80
+    assert cfg.self_lag_decay_rate == 0.15
+    assert cfg.base_lagged_edge_prob == 0.40
+    assert cfg.target_self_lag_magnitude_min == 0.55
+    assert cfg.target_self_lag_magnitude_max == 0.85
+    assert cfg.force_positive_self_lag is True
+
+
+def test_mode_ladder_profile_uses_softer_self_lag_floor_than_generic_target(
+    priors_modules,
+) -> None:
+    profiles_mod = priors_modules["research_profiles"]
+    profile = profiles_mod.get_research_profile("medium32k_live_mode_ladder")
+
+    assert profile.train_source.cfg is not None
+    assert profile.train_source.cfg.lagged_sampler_mode == "separated_self_cross"
+    assert profile.train_source.cfg.target_self_lag_magnitude_min == 0.50
+    assert profile.train_source.cfg.target_self_lag_magnitude_max == 0.78
+    assert profile.train_source.cfg.target_self_lag_min_budget_fraction == 0.15
+    assert profile.train_source.cfg.target_self_lag_abs_min == 0.10
 
 
 def test_non_baseline_profiles_validate_on_raw_target_cfg(priors_modules) -> None:
@@ -241,8 +255,11 @@ def test_research_profiles_default_to_nonzero_weight_decay_and_stronger_self_lag
 
     assert profile.training_budget.weight_decay == 1e-4
     assert profile.train_source.cfg is not None
-    assert profile.train_source.cfg.target_self_lag_min_budget_fraction == 0.70
-    assert profile.train_source.cfg.target_self_lag_abs_min == 0.55
+    assert profile.train_source.cfg.lagged_sampler_mode == "separated_self_cross"
+    assert profile.train_source.cfg.target_self_lag_magnitude_min == 0.55
+    assert profile.train_source.cfg.target_self_lag_magnitude_max == 0.85
+    assert profile.train_source.cfg.target_self_lag_min_budget_fraction == 0.25
+    assert profile.train_source.cfg.target_self_lag_abs_min == 0.15
     assert profile.train_source.cfg.noise_scale_schedule_tag is None
 
 
@@ -257,8 +274,17 @@ def test_surviving_curriculum_profiles_use_shorter_early_series_windows(
     }
     assert mode_map["graph_only"]["series_length_min"] == 64
     assert mode_map["graph_only"]["series_length_max"] == 128
+    assert mode_map["noise_only"]["noise_family"] == "normal"
+    assert mode_map["missing_only"]["missing_mode"] == "mcar"
+    assert mode_map["missing_only"]["missing_mode_probs"] == (0.9, 0.1)
+    assert mode_map["missing_only"]["missing_rate_min"] == 0.02
+    assert mode_map["missing_only"]["missing_rate_max"] == 0.08
+    assert mode_map["missing_only"]["block_missing_prob"] == 0.0
     assert mode_map["temporal_only"]["series_length_min"] == 96
     assert mode_map["temporal_only"]["series_length_max"] == 128
+    assert mode_ladder.train_source.sample_filter is not None
+    assert mode_ladder.train_source.sample_filter.min_probe_train_r2 == 0.08
+    assert mode_ladder.train_source.sample_filter.max_missing_fraction == 0.18
 
     mixture = profiles_mod.get_research_profile("medium32k_live_mixture")
     child_sources = {name: cfg for name, cfg in mixture.train_source.child_sources}
