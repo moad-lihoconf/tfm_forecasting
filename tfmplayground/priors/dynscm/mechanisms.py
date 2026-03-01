@@ -51,6 +51,7 @@ def sample_regime_mechanisms(
     graph_sample: DynSCMGraphSample,
     *,
     stability_sample: DynSCMStabilitySample | None = None,
+    target_idx: int | None = None,
     seed: int | None = None,
 ) -> DynSCMMechanismSample:
     """Sample phase-4 mechanisms coupled to graph and stability outputs.
@@ -65,7 +66,7 @@ def sample_regime_mechanisms(
         rng = cfg.make_rng(seed)
         stability_seed = int(rng.integers(0, np.iinfo(np.int64).max))
         stability_sample = sample_stable_coefficients(
-            cfg, graph_sample, seed=stability_seed
+            cfg, graph_sample, target_idx=target_idx, seed=stability_seed
         )
     else:
         rng = cfg.make_rng(seed)

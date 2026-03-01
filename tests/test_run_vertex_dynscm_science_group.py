@@ -69,6 +69,7 @@ def test_run_vertex_dynscm_science_group_dry_run_temporal(tmp_path: Path) -> Non
         "[dry-run] group=temporal_ablation profile=temporal_full_medium32k_reference"
         in stdout
     )
+    assert stdout.count("learnability_audit=enabled") == 6
     assert stdout.count("benchmark_compare=enabled") == 6
 
 
@@ -106,4 +107,44 @@ def test_run_vertex_dynscm_science_group_dry_run_benchmark(tmp_path: Path) -> No
         "[dry-run] group=benchmark_contract "
         "profile=benchmark_contract_observed_temporal" in stdout
     )
+    assert stdout.count("learnability_audit=enabled") == 2
     assert stdout.count("prior_audit=enabled") == 2
+
+
+def test_run_vertex_dynscm_science_group_dry_run_normalization(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    _write_fake_gcloud(bin_dir)
+
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    completed = subprocess.run(
+        [
+            "bash",
+            "scripts/run_vertex_dynscm_science_group.sh",
+            "--group",
+            "normalization_ablation",
+            "--run-prefix",
+            "science-test",
+            "--dry-run",
+        ],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    stdout = completed.stdout
+    assert (
+        "[dry-run] group=normalization_ablation profile=mode_ladder_norm_none" in stdout
+    )
+    assert (
+        "[dry-run] group=normalization_ablation profile=mode_ladder_norm_zscore"
+        in stdout
+    )
+    assert (
+        "[dry-run] group=normalization_ablation profile=mode_ladder_norm_clamped"
+        in stdout
+    )

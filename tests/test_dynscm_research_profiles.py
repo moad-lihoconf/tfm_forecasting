@@ -17,6 +17,11 @@ def test_research_profiles_define_expected_names(priors_modules) -> None:
         "temporal_full_medium32k_reference",
         "benchmark_contract_observed_easy",
         "benchmark_contract_observed_temporal",
+        "mode_ladder_norm_none",
+        "mode_ladder_norm_zscore",
+        "mode_ladder_norm_clamped",
+        "integration_contract_easy",
+        "integration_contract_temporal",
     )
 
 
@@ -78,29 +83,36 @@ def test_temporal_ablation_profiles_change_only_intended_temporal_axes(
     priors_modules,
 ) -> None:
     profiles_mod = priors_modules["research_profiles"]
-    stable = profiles_mod.stable_cfg().to_dict()
-    expected = {
-        "temporal_length_only_16k": {"series_length_max"},
-        "temporal_regimes_only_16k": {"num_regimes", "sticky_rho"},
-        "temporal_drift_only_16k": {"drift_std"},
-        "temporal_regimes_plus_drift_16k": {"num_regimes", "sticky_rho", "drift_std"},
-        "temporal_length_plus_regimes_16k": {
-            "series_length_max",
-            "num_regimes",
-            "sticky_rho",
-        },
-        "temporal_full_medium32k_reference": {
-            "series_length_max",
-            "num_regimes",
-            "sticky_rho",
-            "drift_std",
-        },
-    }
-    for name, changed_keys in expected.items():
-        profile = profiles_mod.get_research_profile(name)
-        current = profile.train_source.cfg.to_dict()
-        actual = {key for key, value in current.items() if stable[key] != value}
-        assert actual == changed_keys
+    base = profiles_mod.temporal_learnable_cfg()
+
+    length_only = profiles_mod.get_research_profile(
+        "temporal_length_only_16k"
+    ).train_source.cfg
+    assert length_only.series_length_max == 256
+    assert length_only.num_regimes == 1
+    assert length_only.drift_std == 0.0
+    assert length_only.noise_family == base.noise_family
+
+    regimes_only = profiles_mod.get_research_profile(
+        "temporal_regimes_only_16k"
+    ).train_source.cfg
+    assert regimes_only.series_length_max == 128
+    assert regimes_only.num_regimes == 2
+    assert regimes_only.drift_std == 0.0
+
+    drift_only = profiles_mod.get_research_profile(
+        "temporal_drift_only_16k"
+    ).train_source.cfg
+    assert drift_only.series_length_max == 128
+    assert drift_only.num_regimes == 1
+    assert drift_only.drift_std == 0.01
+
+    full_ref = profiles_mod.get_research_profile(
+        "temporal_full_medium32k_reference"
+    ).train_source.cfg
+    assert full_ref.series_length_max == 256
+    assert full_ref.num_regimes == 2
+    assert full_ref.drift_std == 0.01
 
 
 def test_benchmark_contract_profiles_match_benchmark_shape_contract(
@@ -118,14 +130,35 @@ def test_benchmark_contract_profiles_match_benchmark_shape_contract(
         assert cfg.train_rows_max == 32
         assert cfg.test_rows_min == 16
         assert cfg.test_rows_max == 16
-        assert cfg.forecast_horizons == (1, 3, 6, 12)
+        assert cfg.forecast_horizons == (1, 3)
         assert cfg.explicit_lags == (0, 1, 2, 5, 10)
         assert cfg.num_kernels == 3
-        assert cfg.add_mask_channels is True
+        assert cfg.add_mask_channels is False
         assert cfg.missing_mode == "off"
         assert cfg.mechanism_type == "linear_var"
         assert cfg.noise_family == "normal"
         assert cfg.kernel_family == "exp_decay"
+        assert cfg.enforce_target_lagged_parent is True
+        assert cfg.learnability_probe is True
+
+
+def test_revised_research_profiles_use_only_short_horizons(priors_modules) -> None:
+    profiles_mod = priors_modules["research_profiles"]
+    for name in (
+        "medium32k_live_baseline",
+        "medium32k_live_guardrails",
+        "medium32k_live_batch_homogeneous",
+        "medium32k_live_mode_ladder",
+        "medium32k_live_mixture",
+        *profiles_mod.TEMPORAL_ABLATION_PROFILES,
+        "benchmark_contract_observed_easy",
+        "benchmark_contract_observed_temporal",
+    ):
+        profile = profiles_mod.get_research_profile(name)
+        if profile.train_source.cfg is not None:
+            assert profile.train_source.cfg.forecast_horizons == (1, 3)
+        if profile.val_source.cfg is not None:
+            assert profile.val_source.cfg.forecast_horizons == (1, 3)
 
 
 def test_temporal_profiles_use_shorter_common_budget(priors_modules) -> None:
@@ -138,7 +171,7 @@ def test_temporal_profiles_use_shorter_common_budget(priors_modules) -> None:
 
 def test_non_baseline_profiles_validate_on_raw_target_cfg(priors_modules) -> None:
     profiles_mod = priors_modules["research_profiles"]
-    target_cfg = profiles_mod.target_cfg()
+    target_cfg = profiles_mod.target_learnable_cfg()
 
     for name in (
         "medium32k_live_guardrails",
@@ -148,6 +181,28 @@ def test_non_baseline_profiles_validate_on_raw_target_cfg(priors_modules) -> Non
     ):
         profile = profiles_mod.get_research_profile(name)
         assert profile.val_source.cfg == target_cfg
+
+
+def test_normalization_ablation_profiles_only_change_target_normalization(
+    priors_modules,
+) -> None:
+    profiles_mod = priors_modules["research_profiles"]
+    assert (
+        profiles_mod.get_research_profile("mode_ladder_norm_none").target_normalization
+        == "none"
+    )
+    assert (
+        profiles_mod.get_research_profile(
+            "mode_ladder_norm_zscore"
+        ).target_normalization
+        == "per_function_zscore"
+    )
+    assert (
+        profiles_mod.get_research_profile(
+            "mode_ladder_norm_clamped"
+        ).target_normalization
+        == "per_function_clamped"
+    )
 
 
 def test_guardrailed_profiles_use_elevated_retry_budget(priors_modules) -> None:
@@ -162,6 +217,17 @@ def test_guardrailed_profiles_use_elevated_retry_budget(priors_modules) -> None:
     ):
         profile = profiles_mod.get_research_profile(name)
         assert profile.train_source.max_sample_attempts_per_item == expected
+
+
+def test_research_profiles_default_to_nonzero_weight_decay_and_stronger_self_lag(
+    priors_modules,
+) -> None:
+    profiles_mod = priors_modules["research_profiles"]
+    profile = profiles_mod.get_research_profile("medium32k_live_baseline")
+
+    assert profile.training_budget.weight_decay == 1e-4
+    assert profile.train_source.cfg is not None
+    assert profile.train_source.cfg.target_self_lag_min_budget_fraction == 0.40
 
 
 def test_build_promotion_profile_upgrades_training_source_to_full_cfg(

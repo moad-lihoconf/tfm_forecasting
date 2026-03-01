@@ -29,12 +29,18 @@ COMMON_BATCH_SHARED_FIELDS = (
     "missing_mode",
     "kernel_family",
 )
+SHORT_RESEARCH_HORIZONS = (1, 3)
 PHASE1_LIVE_PROFILES = (
     "medium32k_live_baseline",
     "medium32k_live_guardrails",
     "medium32k_live_batch_homogeneous",
     "medium32k_live_mode_ladder",
     "medium32k_live_mixture",
+)
+GENERATOR_LEARNABILITY_PROFILES = (
+    "medium32k_live_mode_ladder",
+    "medium32k_live_mixture",
+    "benchmark_contract_observed_easy",
 )
 TEMPORAL_ABLATION_PROFILES = (
     "temporal_length_only_16k",
@@ -44,9 +50,20 @@ TEMPORAL_ABLATION_PROFILES = (
     "temporal_length_plus_regimes_16k",
     "temporal_full_medium32k_reference",
 )
+TEMPORAL_ABLATION_V2_PROFILES = TEMPORAL_ABLATION_PROFILES
 BENCHMARK_CONTRACT_PROFILES = (
     "benchmark_contract_observed_easy",
     "benchmark_contract_observed_temporal",
+)
+BENCHMARK_CONTRACT_V2_PROFILES = BENCHMARK_CONTRACT_PROFILES
+NORMALIZATION_ABLATION_PROFILES = (
+    "mode_ladder_norm_none",
+    "mode_ladder_norm_zscore",
+    "mode_ladder_norm_clamped",
+)
+FINAL_INTEGRATION_PROFILES = (
+    "integration_contract_easy",
+    "integration_contract_temporal",
 )
 
 
@@ -57,7 +74,7 @@ class ResearchTrainingBudget:
     batch_size: int = 16
     accumulate: int = 2
     lr: float = 5e-4
-    weight_decay: float = 0.0
+    weight_decay: float = 1e-4
     dropout: float = 0.0
     amp: bool = True
     amp_dtype: Literal["float16", "bfloat16"] = "float16"
@@ -101,6 +118,9 @@ class DynSCMLiveResearchProfile:
     warm_start_checkpoint: str
     train_seed: int
     val_seed: int
+    target_normalization: Literal[
+        "none", "per_function_zscore", "per_function_clamped"
+    ] = "none"
     max_seq_len: int = LIVE_MAX_SEQ_LEN
     max_features: int = LIVE_MAX_FEATURES
 
@@ -144,76 +164,209 @@ def temporal_cfg() -> DynSCMConfig:
     )
 
 
+def _apply_learnability_envelope(
+    cfg: DynSCMConfig,
+    *,
+    min_informative_feature_count: int,
+    normal_noise_only: bool = False,
+    keep_mask_channels: bool | None = None,
+    noise_scale_schedule_tag: str | None = None,
+) -> DynSCMConfig:
+    overrides: dict[str, object] = {
+        "enforce_target_lagged_parent": True,
+        "force_target_self_lag_if_parentless": True,
+        "target_self_lag_min_budget_fraction": 0.40,
+        "target_self_lag_abs_min": 0.20,
+        "disable_mask_channels_when_missing_off": True,
+        "learnability_probe": True,
+        "learnability_probe_min_r2": 0.02,
+        "informative_feature_std_floor": 1e-3,
+        "min_informative_feature_count": min_informative_feature_count,
+        "noise_scale_schedule_tag": noise_scale_schedule_tag,
+        "forecast_horizons": SHORT_RESEARCH_HORIZONS,
+        # Prefer sparse-but-strong temporal structure over many weak parents.
+        "lagged_parent_rate": min(float(cfg.lagged_parent_rate), 1.0),
+        "max_lagged_parents": min(int(cfg.max_lagged_parents), 2),
+        "max_contemp_parents": min(int(cfg.max_contemp_parents), 1),
+    }
+    if keep_mask_channels is None:
+        keep_mask_channels = bool(cfg.missing_mode != "off")
+    overrides["add_mask_channels"] = bool(keep_mask_channels)
+    if normal_noise_only:
+        overrides.update(
+            {
+                "noise_family": "normal",
+                "noise_family_choices": None,
+                "noise_family_probs": None,
+            }
+        )
+    return cfg.with_overrides(**overrides)
+
+
+def _learnability_filter(
+    *, min_informative_feature_count: int
+) -> DynSCMSampleFilterConfig:
+    return DynSCMSampleFilterConfig(
+        reject_clipped=True,
+        max_abs_value_cap=1000.0,
+        min_train_target_std=1e-3,
+        min_probe_r2=0.02,
+        min_informative_feature_count=min_informative_feature_count,
+        informative_feature_std_floor=1e-3,
+    )
+
+
+@lru_cache(maxsize=1)
+def stable_learnable_cfg() -> DynSCMConfig:
+    return _apply_learnability_envelope(stable_cfg(), min_informative_feature_count=10)
+
+
+@lru_cache(maxsize=1)
+def target_learnable_cfg() -> DynSCMConfig:
+    return _apply_learnability_envelope(
+        target_cfg(),
+        min_informative_feature_count=10,
+        normal_noise_only=True,
+        noise_scale_schedule_tag="temporal_low_noise",
+    )
+
+
+@lru_cache(maxsize=1)
+def full_learnable_cfg() -> DynSCMConfig:
+    return _apply_learnability_envelope(
+        full_cfg(),
+        min_informative_feature_count=10,
+        normal_noise_only=True,
+        noise_scale_schedule_tag="benchmark_contract_scale_up",
+    )
+
+
+@lru_cache(maxsize=1)
+def temporal_learnable_cfg() -> DynSCMConfig:
+    return _apply_learnability_envelope(
+        temporal_cfg(),
+        min_informative_feature_count=10,
+        normal_noise_only=True,
+        keep_mask_channels=False,
+        noise_scale_schedule_tag="temporal_low_noise",
+    )
+
+
 @lru_cache(maxsize=1)
 def temporal_length_only_cfg() -> DynSCMConfig:
-    return stable_cfg().with_overrides(series_length_max=256)
+    return temporal_learnable_cfg().with_overrides(
+        series_length_min=128,
+        series_length_max=256,
+        num_regimes=1,
+        sticky_rho=1.0,
+        drift_std=0.0,
+    )
 
 
 @lru_cache(maxsize=1)
 def temporal_regimes_only_cfg() -> DynSCMConfig:
-    return stable_cfg().with_overrides(num_regimes=2, sticky_rho=0.95)
+    return temporal_learnable_cfg().with_overrides(
+        series_length_min=128,
+        series_length_max=128,
+        num_regimes=2,
+        sticky_rho=0.95,
+        share_base_graph=True,
+        shared_order=True,
+        drift_std=0.0,
+    )
 
 
 @lru_cache(maxsize=1)
 def temporal_drift_only_cfg() -> DynSCMConfig:
-    return stable_cfg().with_overrides(drift_std=0.01)
+    return temporal_learnable_cfg().with_overrides(
+        series_length_min=128,
+        series_length_max=128,
+        num_regimes=1,
+        sticky_rho=1.0,
+        drift_std=0.01,
+    )
 
 
 @lru_cache(maxsize=1)
 def temporal_regimes_plus_drift_cfg() -> DynSCMConfig:
-    return stable_cfg().with_overrides(num_regimes=2, sticky_rho=0.95, drift_std=0.01)
+    return temporal_learnable_cfg().with_overrides(
+        series_length_min=128,
+        series_length_max=128,
+        num_regimes=2,
+        sticky_rho=0.95,
+        share_base_graph=True,
+        shared_order=True,
+        drift_std=0.01,
+    )
 
 
 @lru_cache(maxsize=1)
 def temporal_length_plus_regimes_cfg() -> DynSCMConfig:
-    return stable_cfg().with_overrides(
+    return temporal_learnable_cfg().with_overrides(
+        series_length_min=128,
         series_length_max=256,
         num_regimes=2,
         sticky_rho=0.95,
+        share_base_graph=True,
+        shared_order=True,
+        drift_std=0.0,
     )
 
 
 @lru_cache(maxsize=1)
 def temporal_full_medium32k_reference_cfg() -> DynSCMConfig:
-    return target_cfg()
+    return target_learnable_cfg().with_overrides(
+        num_regimes=2,
+        sticky_rho=0.95,
+        share_base_graph=True,
+        shared_order=True,
+        drift_std=0.01,
+    )
 
 
 def _benchmark_contract_base_cfg() -> DynSCMConfig:
-    return stable_cfg().with_overrides(
-        num_variables_min=2,
-        num_variables_max=2,
-        train_rows_min=32,
-        train_rows_max=32,
-        test_rows_min=16,
-        test_rows_max=16,
-        forecast_horizons=(1, 3, 6, 12),
-        explicit_lags=(0, 1, 2, 5, 10),
-        num_kernels=3,
-        max_feature_lag=32,
-        add_mask_channels=True,
-        use_contemp_edges=False,
-        max_contemp_parents=0,
-        max_lagged_parents=2,
-        contemp_parent_rate=0.0,
-        lagged_parent_rate=1.0,
-        contemp_edge_add_prob=0.0,
-        contemp_edge_del_prob=0.0,
-        lagged_edge_add_prob=0.0,
-        lagged_edge_del_prob=0.0,
-        missing_mode="off",
-        missing_mode_choices=None,
-        missing_mode_probs=None,
-        mechanism_type="linear_var",
-        mechanism_type_choices=None,
-        mechanism_type_probs=None,
-        noise_family="normal",
-        noise_family_choices=None,
-        noise_family_probs=None,
-        kernel_family="exp_decay",
-        kernel_family_choices=None,
-        kernel_family_probs=None,
-        noise_scale_min=0.15,
-        noise_scale_max=0.60,
+    return _apply_learnability_envelope(
+        stable_cfg().with_overrides(
+            num_variables_min=2,
+            num_variables_max=2,
+            train_rows_min=32,
+            train_rows_max=32,
+            test_rows_min=16,
+            test_rows_max=16,
+            forecast_horizons=(1, 3, 6, 12),
+            explicit_lags=(0, 1, 2, 5, 10),
+            num_kernels=3,
+            max_feature_lag=32,
+            add_mask_channels=True,
+            use_contemp_edges=False,
+            max_contemp_parents=0,
+            max_lagged_parents=2,
+            contemp_parent_rate=0.0,
+            lagged_parent_rate=1.0,
+            contemp_edge_add_prob=0.0,
+            contemp_edge_del_prob=0.0,
+            lagged_edge_add_prob=0.0,
+            lagged_edge_del_prob=0.0,
+            missing_mode="off",
+            missing_mode_choices=None,
+            missing_mode_probs=None,
+            mechanism_type="linear_var",
+            mechanism_type_choices=None,
+            mechanism_type_probs=None,
+            noise_family="normal",
+            noise_family_choices=None,
+            noise_family_probs=None,
+            kernel_family="exp_decay",
+            kernel_family_choices=None,
+            kernel_family_probs=None,
+            noise_scale_min=0.15,
+            noise_scale_max=0.60,
+            noise_scale_schedule_tag="benchmark_contract_scale_up",
+        ),
+        min_informative_feature_count=8,
+        normal_noise_only=True,
+        keep_mask_channels=False,
+        noise_scale_schedule_tag="benchmark_contract_scale_up",
     )
 
 
@@ -258,42 +411,38 @@ def _preserve_guardrail_strategy(
 
 
 def _guardrail_filter() -> DynSCMSampleFilterConfig:
-    return DynSCMSampleFilterConfig(
-        reject_clipped=True,
-        max_abs_value_cap=1000.0,
-        min_train_target_std=1e-3,
-    )
+    return _learnability_filter(min_informative_feature_count=10)
 
 
 def _eval_suites() -> tuple[SyntheticEvalSuiteSpec, ...]:
     return (
         SyntheticEvalSuiteSpec(
             name="stable_eval",
-            cfg=stable_cfg(),
+            cfg=stable_learnable_cfg(),
             steps=64,
             seed=5402,
         ),
         SyntheticEvalSuiteSpec(
             name="temporal_eval",
-            cfg=temporal_cfg(),
+            cfg=temporal_learnable_cfg(),
             steps=64,
             seed=6402,
         ),
         SyntheticEvalSuiteSpec(
             name="temporal_eval_hard",
-            cfg=temporal_cfg(),
+            cfg=temporal_learnable_cfg(),
             steps=64,
             seed=6403,
         ),
         SyntheticEvalSuiteSpec(
             name="target_eval",
-            cfg=target_cfg(),
+            cfg=target_learnable_cfg(),
             steps=64,
             seed=7402,
         ),
         SyntheticEvalSuiteSpec(
             name="full_eval",
-            cfg=full_cfg(),
+            cfg=full_learnable_cfg(),
             steps=32,
             seed=8402,
         ),
@@ -304,19 +453,19 @@ def _temporal_focus_eval_suites() -> tuple[SyntheticEvalSuiteSpec, ...]:
     return (
         SyntheticEvalSuiteSpec(
             name="stable_eval",
-            cfg=stable_cfg(),
+            cfg=stable_learnable_cfg(),
             steps=64,
             seed=5402,
         ),
         SyntheticEvalSuiteSpec(
             name="temporal_eval_hard",
-            cfg=temporal_cfg(),
+            cfg=temporal_learnable_cfg(),
             steps=64,
             seed=6403,
         ),
         SyntheticEvalSuiteSpec(
             name="target_eval",
-            cfg=target_cfg(),
+            cfg=target_learnable_cfg(),
             steps=64,
             seed=7402,
         ),
@@ -458,15 +607,19 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
     temporal_budget = ResearchTrainingBudget(epochs=12)
     eval_suites = _eval_suites()
     temporal_eval_suites = _temporal_focus_eval_suites()
-    target_guardrailed = _guardrailed(target_cfg())
-    stable_guardrailed = _guardrailed(stable_cfg())
-    temporal_guardrailed = _guardrailed(temporal_cfg())
+    target_guardrailed = _guardrailed(target_learnable_cfg())
+    stable_guardrailed = _guardrailed(stable_learnable_cfg())
+    temporal_guardrailed = _guardrailed(temporal_learnable_cfg())
     common_filter = _guardrail_filter()
 
     baseline = DynSCMLiveResearchProfile(
         name="medium32k_live_baseline",
-        train_source=_single_source(target_cfg()),
-        val_source=_single_source(target_cfg()),
+        train_source=_single_source(
+            target_learnable_cfg(),
+            sample_filter=common_filter,
+            max_sample_attempts_per_item=GUARDRAIL_MAX_SAMPLE_ATTEMPTS,
+        ),
+        val_source=_single_source(target_learnable_cfg()),
         eval_suites=eval_suites,
         training_budget=budget,
         warm_start_checkpoint=DEFAULT_RESEARCH_WARM_START_CHECKPOINT,
@@ -480,7 +633,7 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
             sample_filter=common_filter,
             max_sample_attempts_per_item=GUARDRAIL_MAX_SAMPLE_ATTEMPTS,
         ),
-        val_source=_single_source(target_cfg()),
+        val_source=_single_source(target_learnable_cfg()),
         eval_suites=eval_suites,
         training_budget=budget,
         warm_start_checkpoint=DEFAULT_RESEARCH_WARM_START_CHECKPOINT,
@@ -495,7 +648,7 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
             sample_filter=common_filter,
             max_sample_attempts_per_item=GUARDRAIL_MAX_SAMPLE_ATTEMPTS,
         ),
-        val_source=_single_source(target_cfg()),
+        val_source=_single_source(target_learnable_cfg()),
         eval_suites=eval_suites,
         training_budget=budget,
         warm_start_checkpoint=DEFAULT_RESEARCH_WARM_START_CHECKPOINT,
@@ -513,7 +666,7 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
             modes=_mode_ladder_modes(),
             schedule=_mode_ladder_schedule(),
         ),
-        val_source=_single_source(target_cfg()),
+        val_source=_single_source(target_learnable_cfg()),
         eval_suites=eval_suites,
         training_budget=budget,
         warm_start_checkpoint=DEFAULT_RESEARCH_WARM_START_CHECKPOINT,
@@ -535,7 +688,7 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
                 ("target_cfg", target_guardrailed),
             ),
         ),
-        val_source=_single_source(target_cfg()),
+        val_source=_single_source(target_learnable_cfg()),
         eval_suites=eval_suites,
         training_budget=budget,
         warm_start_checkpoint=DEFAULT_RESEARCH_WARM_START_CHECKPOINT,
@@ -544,8 +697,12 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
     )
     temporal_length_only = DynSCMLiveResearchProfile(
         name="temporal_length_only_16k",
-        train_source=_single_source(temporal_length_only_cfg()),
-        val_source=_single_source(target_cfg()),
+        train_source=_single_source(
+            temporal_length_only_cfg(),
+            sample_filter=common_filter,
+            max_sample_attempts_per_item=GUARDRAIL_MAX_SAMPLE_ATTEMPTS,
+        ),
+        val_source=_single_source(target_learnable_cfg()),
         eval_suites=temporal_eval_suites,
         training_budget=temporal_budget,
         warm_start_checkpoint=DEFAULT_RESEARCH_WARM_START_CHECKPOINT,
@@ -554,8 +711,12 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
     )
     temporal_regimes_only = DynSCMLiveResearchProfile(
         name="temporal_regimes_only_16k",
-        train_source=_single_source(temporal_regimes_only_cfg()),
-        val_source=_single_source(target_cfg()),
+        train_source=_single_source(
+            temporal_regimes_only_cfg(),
+            sample_filter=common_filter,
+            max_sample_attempts_per_item=GUARDRAIL_MAX_SAMPLE_ATTEMPTS,
+        ),
+        val_source=_single_source(target_learnable_cfg()),
         eval_suites=temporal_eval_suites,
         training_budget=temporal_budget,
         warm_start_checkpoint=DEFAULT_RESEARCH_WARM_START_CHECKPOINT,
@@ -564,8 +725,12 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
     )
     temporal_drift_only = DynSCMLiveResearchProfile(
         name="temporal_drift_only_16k",
-        train_source=_single_source(temporal_drift_only_cfg()),
-        val_source=_single_source(target_cfg()),
+        train_source=_single_source(
+            temporal_drift_only_cfg(),
+            sample_filter=common_filter,
+            max_sample_attempts_per_item=GUARDRAIL_MAX_SAMPLE_ATTEMPTS,
+        ),
+        val_source=_single_source(target_learnable_cfg()),
         eval_suites=temporal_eval_suites,
         training_budget=temporal_budget,
         warm_start_checkpoint=DEFAULT_RESEARCH_WARM_START_CHECKPOINT,
@@ -574,8 +739,12 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
     )
     temporal_regimes_plus_drift = DynSCMLiveResearchProfile(
         name="temporal_regimes_plus_drift_16k",
-        train_source=_single_source(temporal_regimes_plus_drift_cfg()),
-        val_source=_single_source(target_cfg()),
+        train_source=_single_source(
+            temporal_regimes_plus_drift_cfg(),
+            sample_filter=common_filter,
+            max_sample_attempts_per_item=GUARDRAIL_MAX_SAMPLE_ATTEMPTS,
+        ),
+        val_source=_single_source(target_learnable_cfg()),
         eval_suites=temporal_eval_suites,
         training_budget=temporal_budget,
         warm_start_checkpoint=DEFAULT_RESEARCH_WARM_START_CHECKPOINT,
@@ -584,8 +753,12 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
     )
     temporal_length_plus_regimes = DynSCMLiveResearchProfile(
         name="temporal_length_plus_regimes_16k",
-        train_source=_single_source(temporal_length_plus_regimes_cfg()),
-        val_source=_single_source(target_cfg()),
+        train_source=_single_source(
+            temporal_length_plus_regimes_cfg(),
+            sample_filter=common_filter,
+            max_sample_attempts_per_item=GUARDRAIL_MAX_SAMPLE_ATTEMPTS,
+        ),
+        val_source=_single_source(target_learnable_cfg()),
         eval_suites=temporal_eval_suites,
         training_budget=temporal_budget,
         warm_start_checkpoint=DEFAULT_RESEARCH_WARM_START_CHECKPOINT,
@@ -594,8 +767,12 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
     )
     temporal_full_reference = DynSCMLiveResearchProfile(
         name="temporal_full_medium32k_reference",
-        train_source=_single_source(temporal_full_medium32k_reference_cfg()),
-        val_source=_single_source(target_cfg()),
+        train_source=_single_source(
+            temporal_full_medium32k_reference_cfg(),
+            sample_filter=common_filter,
+            max_sample_attempts_per_item=GUARDRAIL_MAX_SAMPLE_ATTEMPTS,
+        ),
+        val_source=_single_source(target_learnable_cfg()),
         eval_suites=temporal_eval_suites,
         training_budget=temporal_budget,
         warm_start_checkpoint=DEFAULT_RESEARCH_WARM_START_CHECKPOINT,
@@ -604,7 +781,11 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
     )
     benchmark_contract_easy = DynSCMLiveResearchProfile(
         name="benchmark_contract_observed_easy",
-        train_source=_single_source(benchmark_contract_observed_easy_cfg()),
+        train_source=_single_source(
+            benchmark_contract_observed_easy_cfg(),
+            sample_filter=_learnability_filter(min_informative_feature_count=8),
+            max_sample_attempts_per_item=GUARDRAIL_MAX_SAMPLE_ATTEMPTS,
+        ),
         val_source=_single_source(benchmark_contract_observed_easy_cfg()),
         eval_suites=temporal_eval_suites,
         training_budget=budget,
@@ -614,13 +795,54 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
     )
     benchmark_contract_temporal = DynSCMLiveResearchProfile(
         name="benchmark_contract_observed_temporal",
-        train_source=_single_source(benchmark_contract_observed_temporal_cfg()),
+        train_source=_single_source(
+            benchmark_contract_observed_temporal_cfg(),
+            sample_filter=_learnability_filter(min_informative_feature_count=8),
+            max_sample_attempts_per_item=GUARDRAIL_MAX_SAMPLE_ATTEMPTS,
+        ),
         val_source=_single_source(benchmark_contract_observed_temporal_cfg()),
         eval_suites=temporal_eval_suites,
         training_budget=budget,
         warm_start_checkpoint=DEFAULT_RESEARCH_WARM_START_CHECKPOINT,
         train_seed=2603,
         val_seed=3603,
+    )
+    norm_none = replace(
+        mode_ladder,
+        name="mode_ladder_norm_none",
+        target_normalization="none",
+    )
+    norm_zscore = replace(
+        mode_ladder,
+        name="mode_ladder_norm_zscore",
+        target_normalization="per_function_zscore",
+    )
+    norm_clamped = replace(
+        mode_ladder,
+        name="mode_ladder_norm_clamped",
+        target_normalization="per_function_clamped",
+    )
+    integration_easy = replace(
+        mode_ladder,
+        name="integration_contract_easy",
+        train_source=_single_source(
+            benchmark_contract_observed_easy_cfg(),
+            batch_shared_fields=COMMON_BATCH_SHARED_FIELDS,
+            sample_filter=_learnability_filter(min_informative_feature_count=8),
+            max_sample_attempts_per_item=GUARDRAIL_MAX_SAMPLE_ATTEMPTS,
+        ),
+        val_source=_single_source(benchmark_contract_observed_easy_cfg()),
+    )
+    integration_temporal = replace(
+        mode_ladder,
+        name="integration_contract_temporal",
+        train_source=_single_source(
+            benchmark_contract_observed_temporal_cfg(),
+            batch_shared_fields=COMMON_BATCH_SHARED_FIELDS,
+            sample_filter=_learnability_filter(min_informative_feature_count=8),
+            max_sample_attempts_per_item=GUARDRAIL_MAX_SAMPLE_ATTEMPTS,
+        ),
+        val_source=_single_source(benchmark_contract_observed_temporal_cfg()),
     )
     return {
         profile.name: profile
@@ -638,6 +860,11 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
             temporal_full_reference,
             benchmark_contract_easy,
             benchmark_contract_temporal,
+            norm_none,
+            norm_zscore,
+            norm_clamped,
+            integration_easy,
+            integration_temporal,
         )
     }
 
@@ -658,12 +885,12 @@ def _promote_source_to_full(source: LiveSourceSpec) -> LiveSourceSpec:
     if source.kind == "single":
         return replace(
             source,
-            cfg=_preserve_guardrail_strategy(source.cfg, full_cfg()),
+            cfg=_preserve_guardrail_strategy(source.cfg, full_learnable_cfg()),
         )
     if source.kind == "mode_ladder":
         return replace(
             source,
-            cfg=_preserve_guardrail_strategy(source.cfg, full_cfg()),
+            cfg=_preserve_guardrail_strategy(source.cfg, full_learnable_cfg()),
         )
     if source.kind == "mixture":
         promoted_children: list[tuple[str, DynSCMConfig]] = []
@@ -672,7 +899,7 @@ def _promote_source_to_full(source: LiveSourceSpec) -> LiveSourceSpec:
                 promoted_children.append(
                     (
                         "full_cfg",
-                        _preserve_guardrail_strategy(child_cfg, full_cfg()),
+                        _preserve_guardrail_strategy(child_cfg, full_learnable_cfg()),
                     )
                 )
             else:

@@ -73,9 +73,10 @@ def sample_innovations(
     """Sample additive innovations and per-variable scales."""
 
     generator = cfg.make_rng(seed) if rng is None else rng
+    scale_min, scale_max = _resolve_noise_scale_bounds(cfg)
     noise_scales = generator.uniform(
-        cfg.noise_scale_min,
-        cfg.noise_scale_max,
+        scale_min,
+        scale_max,
         size=(num_vars,),
     ).astype(np.float64)
 
@@ -93,6 +94,19 @@ def sample_innovations(
 
     innovations = base * noise_scales[None, :]
     return innovations, noise_scales
+
+
+def _resolve_noise_scale_bounds(cfg: DynSCMConfig) -> tuple[float, float]:
+    scale_min = float(cfg.noise_scale_min)
+    scale_max = float(cfg.noise_scale_max)
+    tag = cfg.noise_scale_schedule_tag
+    if tag == "temporal_low_noise":
+        scale_min *= 0.5
+        scale_max *= 0.5
+    elif tag == "benchmark_contract_scale_up":
+        scale_min *= 1.5
+        scale_max *= 1.5
+    return scale_min, max(scale_min, scale_max)
 
 
 def simulate_dynscm_series(

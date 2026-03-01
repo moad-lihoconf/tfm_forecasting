@@ -9,7 +9,11 @@ Run one ML-science experiment group on Vertex AI, then compute synthetic eval,
 live prior audit, benchmark comparison, and a machine-readable scorecard.
 
 Options:
-  --group NAME              Experiment group: temporal_ablation | benchmark_contract
+  --group NAME              Experiment group:
+                           temporal_ablation | benchmark_contract |
+                           generator_learnability | temporal_ablation_v2 |
+                           benchmark_contract_v2 | normalization_ablation |
+                           integration_final
   --run-prefix PREFIX       Prefix for all run names (default: dynscm-science-<timestamp>)
   --project PROJECT         GCP project (fallback env/gcloud config)
   --region REGION           Vertex region (fallback env/gcloud ai/region or us-central1)
@@ -305,7 +309,24 @@ if [[ -z "$BUCKET_INPUT" ]]; then
 fi
 
 case "$GROUP" in
+  generator_learnability)
+    PROFILES=(
+      medium32k_live_mode_ladder
+      medium32k_live_mixture
+      benchmark_contract_observed_easy
+    )
+    ;;
   temporal_ablation)
+    PROFILES=(
+      temporal_length_only_16k
+      temporal_regimes_only_16k
+      temporal_drift_only_16k
+      temporal_regimes_plus_drift_16k
+      temporal_length_plus_regimes_16k
+      temporal_full_medium32k_reference
+    )
+    ;;
+  temporal_ablation_v2)
     PROFILES=(
       temporal_length_only_16k
       temporal_regimes_only_16k
@@ -319,6 +340,25 @@ case "$GROUP" in
     PROFILES=(
       benchmark_contract_observed_easy
       benchmark_contract_observed_temporal
+    )
+    ;;
+  benchmark_contract_v2)
+    PROFILES=(
+      benchmark_contract_observed_easy
+      benchmark_contract_observed_temporal
+    )
+    ;;
+  normalization_ablation)
+    PROFILES=(
+      mode_ladder_norm_none
+      mode_ladder_norm_zscore
+      mode_ladder_norm_clamped
+    )
+    ;;
+  integration_final)
+    PROFILES=(
+      integration_contract_easy
+      integration_contract_temporal
     )
     ;;
   *)
@@ -336,7 +376,7 @@ resolve_python_cmd
 mkdir -p "$WORK_ROOT"/{logs,artifacts,eval,analysis}
 SCORECARD_TSV="${WORK_ROOT}/scorecard.tsv"
 SCORECARD_JSON="${WORK_ROOT}/scorecard.json"
-printf 'experiment_group\tprofile\trun_name\twarm_start_checkpoint\ttrain_best_val_loss\ttarget_eval_loss\tstable_eval_loss\ttemporal_eval_loss\ttarget_skipped_fraction\tstable_skipped_fraction\tbenchmark_mismatch_summary\tdecision\tnotes\n' > "$SCORECARD_TSV"
+printf 'experiment_group\tprofile\trun_name\twarm_start_checkpoint\ttrain_best_val_loss\ttarget_eval_loss\tstable_eval_loss\ttemporal_eval_loss\ttarget_skipped_fraction\tstable_skipped_fraction\tlow_std_reject_fraction\tprobe_r2_reject_fraction\tclipped_reject_fraction\tforced_target_lag_fraction\tmedian_target_self_lag_weight\tmedian_informative_feature_count\tbenchmark_mismatch_summary\tdecision\tnotes\n' > "$SCORECARD_TSV"
 printf '[]\n' > "$SCORECARD_JSON"
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -344,6 +384,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "[dry-run] group=${GROUP} profile=${profile} run_name=$(run_name_for_profile "$RUN_PREFIX" "$profile")"
     echo "[dry-run] warm_start_checkpoint=${COMMON_WARM_START}"
     echo "[dry-run] synthetic_eval=enabled"
+    echo "[dry-run] learnability_audit=enabled"
     echo "[dry-run] prior_audit=enabled"
     echo "[dry-run] benchmark_compare=enabled"
   done
@@ -376,6 +417,12 @@ for profile in "${PROFILES[@]}"; do
     --research_profile "$profile" \
     --output_json "$eval_json"
 
+  learnability_audit_json="${WORK_ROOT}/analysis/${profile}.learnability_audit.json"
+  "${PYTHON_CMD[@]}" scripts/audit_dynscm_learnability.py \
+    --research_profile "$profile" \
+    --source train \
+    --json-out "$learnability_audit_json"
+
   prior_audit_json="${WORK_ROOT}/analysis/${profile}.prior_audit.json"
   benchmark_compare_json="${WORK_ROOT}/analysis/${profile}.benchmark_compare.json"
   benchmark_compare_md="${WORK_ROOT}/analysis/${profile}.benchmark_compare.md"
@@ -392,6 +439,7 @@ from pathlib import Path
 import torch
 
 eval_payload = json.loads(Path(${eval_json@Q}).read_text(encoding="utf-8"))
+learnability_payload = json.loads(Path(${learnability_audit_json@Q}).read_text(encoding="utf-8"))
 compare_payload = json.loads(Path(${benchmark_compare_json@Q}).read_text(encoding="utf-8"))
 ckpt = torch.load(${local_checkpoint@Q}, map_location="cpu")
 training = ckpt.get("training", {})
@@ -404,6 +452,12 @@ print(float(eval_payload["suites"]["stable_eval"]["loss"]))
 print(float(eval_payload["suites"].get("temporal_eval_hard", eval_payload["suites"].get("temporal_eval", {})).get("loss", float("nan"))))
 print(float(eval_payload["suites"]["target_eval"]["skipped_fraction"]))
 print(float(eval_payload["suites"]["stable_eval"]["skipped_fraction"]))
+print(float(learnability_payload["rejections"]["low_std_fraction"]))
+print(float(learnability_payload["rejections"]["probe_r2_fraction"]))
+print(float(learnability_payload["rejections"]["clipped_fraction"]))
+print(float(learnability_payload["forced_target_lag_fraction"]))
+print(float(learnability_payload["target_self_lag_weight"]["median"]))
+print(float(learnability_payload["informative_feature_count"]["median"]))
 print(summary)
 PY
   )
@@ -414,14 +468,23 @@ PY
   temporal_eval_loss="${metrics[3]}"
   target_skipped_fraction="${metrics[4]}"
   stable_skipped_fraction="${metrics[5]}"
-  benchmark_mismatch_summary="${metrics[6]}"
+  low_std_reject_fraction="${metrics[6]}"
+  probe_r2_reject_fraction="${metrics[7]}"
+  clipped_reject_fraction="${metrics[8]}"
+  forced_target_lag_fraction="${metrics[9]}"
+  median_target_self_lag_weight="${metrics[10]}"
+  median_informative_feature_count="${metrics[11]}"
+  benchmark_mismatch_summary="${metrics[12]}"
   decision="pending_review"
-  notes="eval+benchmark_compare complete"
+  notes="eval+learnability_audit+benchmark_compare complete"
 
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$GROUP" "$profile" "$run_name" "$COMMON_WARM_START" "$train_best_val_loss" \
     "$target_eval_loss" "$stable_eval_loss" "$temporal_eval_loss" \
     "$target_skipped_fraction" "$stable_skipped_fraction" \
+    "$low_std_reject_fraction" "$probe_r2_reject_fraction" "$clipped_reject_fraction" \
+    "$forced_target_lag_fraction" "$median_target_self_lag_weight" \
+    "$median_informative_feature_count" \
     "$benchmark_mismatch_summary" "$decision" "$notes" >> "$SCORECARD_TSV"
 
   row_json="$("${PYTHON_CMD[@]}" - <<PY
@@ -437,6 +500,12 @@ print(json.dumps({
     "temporal_eval_loss": float(${temporal_eval_loss@Q}),
     "target_skipped_fraction": float(${target_skipped_fraction@Q}),
     "stable_skipped_fraction": float(${stable_skipped_fraction@Q}),
+    "low_std_reject_fraction": float(${low_std_reject_fraction@Q}),
+    "probe_r2_reject_fraction": float(${probe_r2_reject_fraction@Q}),
+    "clipped_reject_fraction": float(${clipped_reject_fraction@Q}),
+    "forced_target_lag_fraction": float(${forced_target_lag_fraction@Q}),
+    "median_target_self_lag_weight": float(${median_target_self_lag_weight@Q}),
+    "median_informative_feature_count": float(${median_informative_feature_count@Q}),
     "benchmark_mismatch_summary": ${benchmark_mismatch_summary@Q},
     "decision": ${decision@Q},
     "notes": ${notes@Q},

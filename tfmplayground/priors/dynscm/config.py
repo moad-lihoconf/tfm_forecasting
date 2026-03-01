@@ -342,6 +342,44 @@ class DynSCMFeatureConfig(_FrozenConfigModel):
         return self
 
 
+class DynSCMResearchConfig(_FrozenConfigModel):
+    """Research-only controls for learnability, persistence, and difficulty."""
+
+    enforce_target_lagged_parent: bool = False
+    enforce_all_nodes_lagged_parent: bool = False
+    force_target_self_lag_if_parentless: bool = False
+    target_self_lag_min_budget_fraction: float | None = Field(default=None, ge=0.0)
+    target_self_lag_abs_min: float | None = Field(default=None, ge=0.0)
+    disable_mask_channels_when_missing_off: bool = True
+    noise_scale_schedule_tag: str | None = None
+    learnability_probe: bool = False
+    learnability_probe_min_r2: float | None = Field(default=None, ge=-1.0, le=1.0)
+    informative_feature_std_floor: float | None = Field(default=None, ge=0.0)
+    min_informative_feature_count: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _cross_validate(self) -> DynSCMResearchConfig:
+        errors = []
+        if (
+            self.target_self_lag_min_budget_fraction is not None
+            and self.target_self_lag_min_budget_fraction > 1.0
+        ):
+            errors.append(
+                "target_self_lag_min_budget_fraction must be <= 1.0 when set."
+            )
+        if (
+            self.min_informative_feature_count is not None
+            and self.informative_feature_std_floor is None
+        ):
+            errors.append(
+                "informative_feature_std_floor must be set when "
+                "min_informative_feature_count is set."
+            )
+        if errors:
+            raise ValueError("\n".join(errors))
+        return self
+
+
 class DynSCMSafetyConfig(_FrozenConfigModel):
     """Safety knobs for bounded sampling."""
 
@@ -358,6 +396,7 @@ _CONFIG_GROUP_MODELS: dict[str, type[_FrozenConfigModel]] = {
     "noise": DynSCMNoiseConfig,
     "missingness": DynSCMMissingnessConfig,
     "features": DynSCMFeatureConfig,
+    "research": DynSCMResearchConfig,
     "safety": DynSCMSafetyConfig,
 }
 
@@ -382,6 +421,7 @@ class DynSCMConfig(_FrozenConfigModel):
         default_factory=DynSCMMissingnessConfig
     )
     features: DynSCMFeatureConfig = Field(default_factory=DynSCMFeatureConfig)
+    research: DynSCMResearchConfig = Field(default_factory=DynSCMResearchConfig)
     safety: DynSCMSafetyConfig = Field(default_factory=DynSCMSafetyConfig)
 
     @model_validator(mode="before")

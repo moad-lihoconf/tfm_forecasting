@@ -144,7 +144,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--target_normalization",
         type=str,
-        default="none",
+        default=None,
         choices=["per_function_zscore", "per_function_clamped", "none"],
     )
     parser.add_argument("--target_std_floor", type=float, default=1e-2)
@@ -346,6 +346,7 @@ def _run_config_payload(
     resolved_budget: ResolvedBudget,
     loadcheckpoint: str | None,
     warm_start: bool,
+    resolved_target_normalization: str,
 ) -> dict[str, object]:
     return {
         "research_profile": profile.name,
@@ -360,7 +361,7 @@ def _run_config_payload(
         "cli": {
             "optimizer": args.optimizer,
             "regression_loss": args.regression_loss,
-            "target_normalization": args.target_normalization,
+            "target_normalization": resolved_target_normalization,
             "target_std_floor": float(args.target_std_floor),
             "min_train_target_std": float(args.min_train_target_std),
             "feature_normalization": args.feature_normalization,
@@ -423,6 +424,11 @@ def main(argv: list[str] | None = None) -> None:
         else get_research_profile(args.research_profile)
     )
     budget = profile.training_budget
+    resolved_target_normalization = (
+        args.target_normalization
+        if args.target_normalization is not None
+        else profile.target_normalization
+    )
 
     resolved_budget: ResolvedBudget = {
         "epochs": _as_int(_budget_value(args.epochs, budget.epochs)),
@@ -546,7 +552,7 @@ def main(argv: list[str] | None = None) -> None:
                 "target_normalization",
                 ckpt.get("training", {}).get("target_normalization", "none"),
             )
-            if checkpoint_target_normalization != args.target_normalization:
+            if checkpoint_target_normalization != resolved_target_normalization:
                 raise ValueError(
                     "Checkpoint target_normalization does not match requested "
                     "--target_normalization."
@@ -692,7 +698,7 @@ def main(argv: list[str] | None = None) -> None:
             loss_weighting=resolved_budget["loss_weighting"],
             optimizer_name=args.optimizer,
             regression_loss_name=args.regression_loss,
-            target_normalization=args.target_normalization,
+            target_normalization=resolved_target_normalization,
             target_std_floor=args.target_std_floor,
             min_train_target_std=args.min_train_target_std,
             debug_trace_path=local_debug_trace_path,
@@ -732,6 +738,7 @@ def main(argv: list[str] | None = None) -> None:
                         resolved_budget=resolved_budget,
                         loadcheckpoint=effective_loadcheckpoint,
                         warm_start=effective_warm_start,
+                        resolved_target_normalization=resolved_target_normalization,
                     ),
                     indent=2,
                     sort_keys=True,
@@ -780,6 +787,7 @@ def main(argv: list[str] | None = None) -> None:
                 resolved_budget=resolved_budget,
                 loadcheckpoint=effective_loadcheckpoint,
                 warm_start=effective_warm_start,
+                resolved_target_normalization=resolved_target_normalization,
             ),
         }
 
@@ -826,7 +834,7 @@ def main(argv: list[str] | None = None) -> None:
                     ),
                     "target_normalization": train_info.get(
                         "target_normalization",
-                        args.target_normalization,
+                        resolved_target_normalization,
                     ),
                     "target_std_floor": train_info.get(
                         "target_std_floor",

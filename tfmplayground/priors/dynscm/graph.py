@@ -35,6 +35,9 @@ class DynSCMGraphSample:
     regime_contemp_adjacency: RegimeAdj3D
     regime_lagged_adjacency: RegimeLagAdj4D
     regime_parent_sets: ParentsByRegime
+    forced_target_lag_parent: npt.NDArray[np.bool_]
+    forced_target_self_lag: npt.NDArray[np.bool_]
+    target_lag_parent_counts: npt.NDArray[np.int64]
 
     @property
     def num_regimes(self) -> int:
@@ -53,6 +56,7 @@ def sample_regime_graphs(
     cfg: DynSCMConfig,
     num_vars: int,
     *,
+    target_idx: int | None = None,
     seed: int | None = None,
 ) -> DynSCMGraphSample:
     """Sample regime-specific graphs using a base template and sparse edge flips."""
@@ -96,6 +100,9 @@ def sample_regime_graphs(
     regime_lagged_adjacency = np.zeros(
         (cfg.num_regimes, cfg.max_lag, num_vars, num_vars), dtype=bool
     )
+    forced_target_lag_parent = np.zeros((cfg.num_regimes,), dtype=bool)
+    forced_target_self_lag = np.zeros((cfg.num_regimes,), dtype=bool)
+    target_lag_parent_counts = np.full((cfg.num_regimes,), -1, dtype=np.int64)
 
     for regime_idx in range(cfg.num_regimes):
         regime_topological_order = regime_topo_orders[regime_idx]
@@ -138,9 +145,25 @@ def sample_regime_graphs(
             max_parents=cfg.max_lagged_parents,
             rng=rng,
         )
+        (
+            regime_lagged,
+            forced_target_parent,
+            forced_target_self,
+        ) = _enforce_lagged_parent_invariants(
+            cfg=cfg,
+            lagged=regime_lagged,
+            target_idx=target_idx,
+            rng=rng,
+        )
 
         regime_contemp_adjacency[regime_idx] = regime_contemp
         regime_lagged_adjacency[regime_idx] = regime_lagged
+        forced_target_lag_parent[regime_idx] = forced_target_parent
+        forced_target_self_lag[regime_idx] = forced_target_self
+        if target_idx is not None:
+            target_lag_parent_counts[regime_idx] = int(
+                np.sum(regime_lagged[:, :, target_idx])
+            )
 
     _validate_graph_arrays(
         orders=regime_topo_orders,
@@ -163,6 +186,9 @@ def sample_regime_graphs(
         regime_contemp_adjacency=regime_contemp_adjacency,
         regime_lagged_adjacency=regime_lagged_adjacency,
         regime_parent_sets=regime_parent_sets,
+        forced_target_lag_parent=forced_target_lag_parent,
+        forced_target_self_lag=forced_target_self_lag,
+        target_lag_parent_counts=target_lag_parent_counts,
     )
 
 
@@ -343,6 +369,54 @@ def _flip_lagged(
         output[lag_idx] = matrix
 
     return output
+
+
+def _enforce_lagged_parent_invariants(
+    *,
+    cfg: DynSCMConfig,
+    lagged: np.ndarray,
+    target_idx: int | None,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, bool, bool]:
+    output = lagged.copy()
+    num_lags, num_vars, _ = output.shape
+    required_targets: set[int] = set()
+    if cfg.enforce_all_nodes_lagged_parent:
+        required_targets.update(range(num_vars))
+    if cfg.enforce_target_lagged_parent and target_idx is not None:
+        required_targets.add(int(target_idx))
+
+    forced_target_parent = False
+    forced_target_self = False
+    if (
+        target_idx is not None
+        and (
+            cfg.target_self_lag_min_budget_fraction is not None
+            or cfg.target_self_lag_abs_min is not None
+        )
+        and not bool(output[0, int(target_idx), int(target_idx)])
+    ):
+        output[0, int(target_idx), int(target_idx)] = True
+        forced_target_parent = True
+        forced_target_self = True
+
+    for target in sorted(required_targets):
+        if np.any(output[:, :, target]):
+            continue
+        use_self_edge = bool(
+            target_idx is not None
+            and target == target_idx
+            and (
+                cfg.force_target_self_lag_if_parentless
+                or cfg.enforce_target_lagged_parent
+            )
+        )
+        source = int(target) if use_self_edge else int(rng.integers(0, num_vars))
+        output[0, source, target] = True
+        if target_idx is not None and target == target_idx:
+            forced_target_parent = True
+            forced_target_self = bool(source == target)
+    return output, forced_target_parent, forced_target_self
 
 
 def _validate_graph_arrays(

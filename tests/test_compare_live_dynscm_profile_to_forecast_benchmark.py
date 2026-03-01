@@ -159,7 +159,7 @@ def test_summarize_live_source_and_main_write_expected_artifacts(
     assert payload["research_profile"] == "benchmark_contract_observed_easy"
     assert payload["prior_summary"]["feature_count_before_padding"]["support"] == [37]
     assert isinstance(payload["mismatches"], list)
-    assert audit_payload["mask_channels"] is True
+    assert audit_payload["mask_channels"] is False
     assert "# DynSCM Prior vs Forecast Benchmark" in markdown_out.read_text(
         encoding="utf-8"
     )

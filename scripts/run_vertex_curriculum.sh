@@ -399,7 +399,7 @@ common_train_args() {
 --accumulate=2
 --optimizer=adamw
 --lr=5e-4
---weight_decay=0.0
+--weight_decay=1e-4
 --dropout=0.0
 --amp
 --amp_dtype=float16

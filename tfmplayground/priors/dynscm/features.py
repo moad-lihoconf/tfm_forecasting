@@ -168,8 +168,12 @@ def build_forecasting_table(
         rng=generator,
     )
 
+    include_mask_channels = bool(cfg.add_mask_channels)
+    if cfg.disable_mask_channels_when_missing_off and cfg.missing_mode == "off":
+        include_mask_channels = False
+
     x_parts: list[tuple[str, np.ndarray]] = [("data_values", imputed_data)]
-    if cfg.add_mask_channels and data_observed.shape[2] > 0:
+    if include_mask_channels and data_observed.shape[2] > 0:
         x_parts.append(("data_mask", data_observed.astype(np.float64)))
     if deterministic_values.shape[2] > 0:
         x_parts.append(("deterministic", deterministic_values))

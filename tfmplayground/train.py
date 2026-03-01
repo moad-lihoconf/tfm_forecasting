@@ -243,23 +243,24 @@ def _compute_loss_result(
                         weight=0,
                         debug=debug,
                     )
-                    if not torch.all(valid):
-                        x_batch = x_batch[valid]
-                        y_batch = y_batch[valid]
-                        target_y_batch = target_y_batch[valid]
-                        if target_mask_batch is not None:
-                            target_mask_batch = target_mask_batch[valid]
-                        if torch.is_tensor(num_datapoints_batch):
-                            num_datapoints_batch = num_datapoints_batch[valid]
-                        data = (x_batch, y_batch[:, :eval_pos])
-                        targets = target_y_batch[:, eval_pos:]
-                        mask = (
-                            None
-                            if target_mask_batch is None
-                            else target_mask_batch[:, eval_pos:]
-                        )
-                    y_mean = data[1].mean(dim=1, keepdim=True)
-                    y_std = data[1].std(dim=1, keepdim=True)
+                if not torch.all(valid):
+                    x_batch = x_batch[valid]
+                    y_batch = y_batch[valid]
+                    target_y_batch = target_y_batch[valid]
+                    if target_mask_batch is not None:
+                        target_mask_batch = target_mask_batch[valid]
+                    if torch.is_tensor(num_datapoints_batch):
+                        num_datapoints_tensor = cast(torch.Tensor, num_datapoints_batch)
+                        num_datapoints_batch = num_datapoints_tensor[valid]
+                    data = (x_batch, y_batch[:, :eval_pos])
+                    targets = target_y_batch[:, eval_pos:]
+                    mask = (
+                        None
+                        if target_mask_batch is None
+                        else target_mask_batch[:, eval_pos:]
+                    )
+                y_mean = data[1].mean(dim=1, keepdim=True)
+                y_std = data[1].std(dim=1, keepdim=True)
             if target_normalization == "per_function_zscore":
                 y_scale = y_std + 1e-8
                 data = (data[0], (data[1] - y_mean) / y_scale)

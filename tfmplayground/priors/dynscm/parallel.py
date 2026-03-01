@@ -14,12 +14,14 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency.
     threadpool_limits = None
 
 from .config import DynSCMConfig, sample_dynscm_variant_cfg
+from .difficulty import measure_sample_learnability
 from .features import build_forecasting_table, sample_origins_and_horizons
 from .graph import sample_regime_graphs
 from .mechanisms import sample_regime_mechanisms
 from .missingness import sample_observation_mask
 from .research import DynSCMSampleFilterConfig
 from .simulate import simulate_dynscm_series
+from .stability import sample_stable_coefficients
 
 _SEED_MAX = np.iinfo(np.int64).max
 _THREADPOOL_LIMITS = None
@@ -171,8 +173,20 @@ def build_single_dynscm_sample(
         None
     )
     last_exc: RuntimeError | None = None
+    reject_counts = {
+        "low_std": 0,
+        "probe_r2_low": 0,
+        "probe_r2_high": 0,
+        "clipped": 0,
+        "max_abs_value": 0,
+        "informative_features_low": 0,
+        "missing_fraction_high": 0,
+        "block_missing_fraction_high": 0,
+    }
+    attempt_count = 0
     for attempt_idx in range(max_generation_attempts):
         attempt_seed = _derive_attempt_seed(sample_seed, attempt_idx)
+        attempt_count = attempt_idx + 1
         try:
             x_padded, y_padded, sample_metadata = _build_single_dynscm_sample_once(
                 base_cfg,
@@ -185,8 +199,13 @@ def build_single_dynscm_sample(
         except RuntimeError as exc:
             last_exc = exc
             continue
-        accepted = sample_filter.accepts(sample_metadata) if sample_filter else True
+        rejection_reason = (
+            sample_filter.rejection_reason(sample_metadata) if sample_filter else None
+        )
+        accepted = rejection_reason is None
         sample_metadata["sampled_filter_accept"] = int(accepted)
+        if rejection_reason is not None:
+            reject_counts[rejection_reason] = reject_counts.get(rejection_reason, 0) + 1
         last_sample = (x_padded, y_padded, sample_metadata)
         if accepted:
             break
@@ -194,6 +213,20 @@ def build_single_dynscm_sample(
         if last_exc is not None:
             raise last_exc
         raise RuntimeError("DynSCM sample generation failed to produce any sample.")
+    last_sample[2]["sampled_generation_attempts_used"] = int(attempt_count)
+    last_sample[2]["sampled_low_std_reject_count"] = int(reject_counts["low_std"])
+    last_sample[2]["sampled_probe_r2_reject_count"] = int(
+        reject_counts["probe_r2_low"] + reject_counts["probe_r2_high"]
+    )
+    last_sample[2]["sampled_clipped_reject_count"] = int(reject_counts["clipped"])
+    last_sample[2]["sampled_max_abs_reject_count"] = int(reject_counts["max_abs_value"])
+    last_sample[2]["sampled_informative_feature_reject_count"] = int(
+        reject_counts["informative_features_low"]
+    )
+    last_sample[2]["sampled_missing_reject_count"] = int(
+        reject_counts["missing_fraction_high"]
+        + reject_counts["block_missing_fraction_high"]
+    )
     return last_sample
 
 
@@ -211,6 +244,14 @@ def _sample_train_target_std(y_raw: np.ndarray, n_train: int) -> float:
     return float(np.std(train_targets, ddof=1))
 
 
+def _target_scale_risk(max_abs_target_value: float, train_target_std: float) -> int:
+    if max_abs_target_value > 1000.0:
+        return 1
+    if train_target_std > 0.0 and max_abs_target_value > (1000.0 * train_target_std):
+        return 1
+    return 0
+
+
 def _build_single_dynscm_sample_once(
     cfg: DynSCMConfig,
     *,
@@ -226,26 +267,35 @@ def _build_single_dynscm_sample_once(
     per_sample_seeds = sample_rng.integers(
         0,
         _SEED_MAX,
-        size=(6,),
+        size=(7,),
         dtype=np.int64,
     )
 
     graph_sample = sample_regime_graphs(
         variant_cfg,
         num_vars=num_vars,
+        target_idx=y_idx,
         seed=int(per_sample_seeds[0]),
+    )
+    stability_sample = sample_stable_coefficients(
+        variant_cfg,
+        graph_sample,
+        target_idx=y_idx,
+        seed=int(per_sample_seeds[1]),
     )
     mechanism_sample = sample_regime_mechanisms(
         variant_cfg,
         graph_sample,
-        seed=int(per_sample_seeds[1]),
+        stability_sample=stability_sample,
+        target_idx=y_idx,
+        seed=int(per_sample_seeds[2]),
     )
     simulation_sample = simulate_dynscm_series(
         variant_cfg,
         graph_sample,
         mechanism_sample,
         num_steps=num_steps,
-        seed=int(per_sample_seeds[2]),
+        seed=int(per_sample_seeds[3]),
     )
 
     series = simulation_sample.series[None, :, :].astype(np.float64, copy=False)
@@ -257,12 +307,12 @@ def _build_single_dynscm_sample_once(
         num_steps=num_steps,
         n_train=n_train,
         n_test=n_test,
-        seed=int(per_sample_seeds[3]),
+        seed=int(per_sample_seeds[4]),
     )
     obs_mask = sample_observation_mask(
         variant_cfg,
         series,
-        seed=int(per_sample_seeds[4]),
+        seed=int(per_sample_seeds[5]),
         label_times=t_idx + h_idx,
         label_var_indices=y_index,
     )
@@ -276,7 +326,7 @@ def _build_single_dynscm_sample_once(
         t_idx=t_idx,
         h_idx=h_idx,
         obs_mask=obs_mask,
-        seed=int(per_sample_seeds[5]),
+        seed=int(per_sample_seeds[6]),
     )
 
     x_prioritized = prioritize_feature_blocks(
@@ -286,6 +336,40 @@ def _build_single_dynscm_sample_once(
     x_budgeted = fit_feature_budget(x_prioritized, num_features=num_features)
     x_padded = pad_rows_3d(x_budgeted, row_budget=row_budget)
     y_padded = pad_rows_2d(y_raw, row_budget=row_budget)
+    learnability = measure_sample_learnability(
+        x=x_prioritized[0],
+        y=y_raw[0],
+        n_train=n_train,
+        observed_mask=obs_mask,
+        informative_feature_std_floor=float(
+            variant_cfg.informative_feature_std_floor
+            if variant_cfg.informative_feature_std_floor is not None
+            else 1e-3
+        ),
+        compute_probe_r2=bool(variant_cfg.learnability_probe),
+        has_long_history=bool(
+            variant_cfg.series_length_max > stable_length_baseline(variant_cfg)
+        ),
+        has_regimes=bool(variant_cfg.num_regimes > 1),
+        has_drift=bool(variant_cfg.drift_std > 0.0),
+        has_missingness=bool(variant_cfg.missing_mode != "off"),
+        has_heavy_tails=bool(variant_cfg.noise_family == "student_t"),
+    )
+    data_mask_slice = metadata["feature_slices"].get("data_mask")
+    mask_channels_enabled = int(
+        data_mask_slice is not None
+        and int(data_mask_slice[1]) > int(data_mask_slice[0])
+    )
+    min_target_parent_count = int(
+        np.min(graph_sample.target_lag_parent_counts)
+        if np.all(graph_sample.target_lag_parent_counts >= 0)
+        else 0
+    )
+    min_target_self_lag_weight = float(
+        np.min(stability_sample.target_self_lag_weights)
+        if stability_sample.target_self_lag_weights.size > 0
+        else 0.0
+    )
 
     sample_metadata = {
         **variant_metadata,
@@ -297,7 +381,39 @@ def _build_single_dynscm_sample_once(
         "sampled_simulation_clipped": int(bool(simulation_sample.clipped)),
         "sampled_simulation_num_attempts": int(simulation_sample.num_attempts),
         "sampled_simulation_max_abs_value": float(simulation_sample.max_abs_value),
-        "sampled_train_target_std": float(_sample_train_target_std(y_raw, n_train)),
+        "sampled_train_target_std": float(learnability.train_target_std),
+        "sampled_test_target_std": float(learnability.test_target_std),
+        "sampled_max_abs_target_value": float(learnability.max_abs_target_value),
+        "sampled_probe_r2": (
+            float(learnability.probe_r2) if learnability.probe_r2 is not None else 0.0
+        ),
+        "sampled_informative_feature_count": int(
+            learnability.informative_feature_count
+        ),
+        "sampled_informative_feature_std_floor": float(
+            learnability.informative_feature_std_floor
+        ),
+        "sampled_target_parent_count": int(min_target_parent_count),
+        "sampled_target_self_lag_weight": float(min_target_self_lag_weight),
+        "sampled_target_had_forced_lag_parent": int(
+            bool(np.any(graph_sample.forced_target_lag_parent))
+        ),
+        "sampled_target_had_forced_self_lag": int(
+            bool(
+                np.any(graph_sample.forced_target_self_lag)
+                or np.any(stability_sample.forced_target_self_lag)
+            )
+        ),
+        "sampled_mask_channels_enabled": int(mask_channels_enabled),
+        "sampled_noise_scale": float(simulation_sample.noise_scales[int(y_idx)]),
+        "sampled_missing_fraction": float(learnability.missing_fraction),
+        "sampled_block_missing_fraction": float(learnability.block_missing_fraction),
+        "sampled_target_scale_high_risk": int(
+            _target_scale_risk(
+                max_abs_target_value=learnability.max_abs_target_value,
+                train_target_std=learnability.train_target_std,
+            )
+        ),
         "sampled_filter_accept": 1,
     }
 
@@ -306,6 +422,10 @@ def _build_single_dynscm_sample_once(
         y_padded[0].astype(np.float32, copy=False),
         sample_metadata,
     )
+
+
+def stable_length_baseline(cfg: DynSCMConfig) -> int:
+    return max(int(cfg.train_rows_max) + int(cfg.test_rows_max), 128)
 
 
 def slice_or_empty(

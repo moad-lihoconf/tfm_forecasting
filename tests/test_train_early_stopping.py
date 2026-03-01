@@ -462,6 +462,7 @@ def test_compute_loss_skips_low_std_regression_functions():
     assert torch.isfinite(filtered.loss)
     assert unfiltered.weight == 4
     assert filtered.weight == 2
+    assert filtered.debug["filtered_low_std_functions"] == 1
 
 
 def test_compute_loss_supports_target_normalization_modes():

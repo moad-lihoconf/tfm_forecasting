@@ -20,6 +20,8 @@ class DynSCMStabilitySample:
     contemp_column_budgets: np.ndarray  # (K, p), per-target budgets for cont. edges.
     spectral_rescale_factors: np.ndarray  # (K,), multiplicative lag rescale factors.
     lag_spectral_radii: np.ndarray  # (K,), spectral radius diagnostics (or NaN).
+    target_self_lag_weights: np.ndarray  # (K,), realized lag-1 target self-lag weights.
+    forced_target_self_lag: np.ndarray  # (K,), whether self-lag was explicitly raised.
 
     @property
     def num_regimes(self) -> int:
@@ -38,6 +40,7 @@ def sample_stable_coefficients(
     cfg: DynSCMConfig,
     graph_sample: DynSCMGraphSample,
     *,
+    target_idx: int | None = None,
     seed: int | None = None,
 ) -> DynSCMStabilitySample:
     num_regimes = graph_sample.num_regimes
@@ -52,6 +55,8 @@ def sample_stable_coefficients(
     contemp_column_budgets = np.zeros((num_regimes, num_vars), dtype=np.float64)
     spectral_rescale_factors = np.ones((num_regimes,), dtype=np.float64)
     lag_spectral_radii = np.full((num_regimes,), np.nan, dtype=np.float64)
+    target_self_lag_weights = np.zeros((num_regimes,), dtype=np.float64)
+    forced_target_self_lag = np.zeros((num_regimes,), dtype=bool)
     compute_spectral_diagnostics = (
         cfg.compute_spectral_diagnostics or cfg.enable_spectral_rescale
     )
@@ -72,6 +77,15 @@ def sample_stable_coefficients(
             target_budgets=lag_budget,
             rng=rng,
         )
+        if target_idx is not None:
+            lag_block, forced_self = _enforce_target_self_lag(
+                cfg=cfg,
+                lag_coeffs=lag_block,
+                edge_mask=lag_mask,
+                target_budget=float(lag_budget[int(target_idx)]),
+                target_idx=int(target_idx),
+            )
+            forced_target_self_lag[regime_idx] = forced_self
         cont_block = sample_signed_budgeted_coefficients(
             edge_mask=cont_mask[None, ...],
             target_budgets=cont_budget,
@@ -92,6 +106,10 @@ def sample_stable_coefficients(
         contemp_coeffs[regime_idx] = cont_block
         lag_column_budgets[regime_idx] = lag_budget
         contemp_column_budgets[regime_idx] = cont_budget
+        if target_idx is not None:
+            target_self_lag_weights[regime_idx] = float(
+                abs(lag_block[0, int(target_idx), int(target_idx)])
+            )
 
     _validate_stability_sample(
         cfg=cfg,
@@ -110,6 +128,8 @@ def sample_stable_coefficients(
         contemp_column_budgets=contemp_column_budgets,
         spectral_rescale_factors=spectral_rescale_factors,
         lag_spectral_radii=lag_spectral_radii,
+        target_self_lag_weights=target_self_lag_weights,
+        forced_target_self_lag=forced_target_self_lag,
     )
 
 
@@ -155,6 +175,69 @@ def sample_signed_budgeted_coefficients(
             coefficients[block_idx, source_idx, target] = values[idx]
 
     return coefficients
+
+
+def _enforce_target_self_lag(
+    *,
+    cfg: DynSCMConfig,
+    lag_coeffs: np.ndarray,
+    edge_mask: np.ndarray,
+    target_budget: float,
+    target_idx: int,
+) -> tuple[np.ndarray, bool]:
+    output = lag_coeffs.astype(np.float64, copy=True)
+    if output.shape != edge_mask.shape:
+        raise ValueError("lag_coeffs and edge_mask must have identical shapes.")
+    if target_budget <= 0.0:
+        return output, False
+    if target_idx < 0 or target_idx >= output.shape[1]:
+        raise ValueError("target_idx outside coefficient support.")
+
+    desired = 0.0
+    if cfg.target_self_lag_min_budget_fraction is not None:
+        desired = max(
+            desired, target_budget * float(cfg.target_self_lag_min_budget_fraction)
+        )
+    if cfg.target_self_lag_abs_min is not None:
+        desired = max(desired, float(cfg.target_self_lag_abs_min))
+    desired = min(desired, target_budget)
+    if desired <= 0.0:
+        return output, False
+
+    if not bool(edge_mask[0, target_idx, target_idx]):
+        output[0, target_idx, target_idx] = 0.0
+        if not cfg.force_target_self_lag_if_parentless:
+            return output, False
+
+    current = float(abs(output[0, target_idx, target_idx]))
+    if current >= desired:
+        output[0, target_idx, target_idx] = abs(output[0, target_idx, target_idx])
+        return output, False
+
+    needed = desired - current
+    other_active = np.argwhere(edge_mask[:, :, target_idx])
+    donor_mask = [
+        (int(block_idx), int(source_idx))
+        for block_idx, source_idx in other_active.tolist()
+        if not (int(block_idx) == 0 and int(source_idx) == target_idx)
+    ]
+    available = float(
+        sum(
+            abs(output[block_idx, source_idx, target_idx])
+            for block_idx, source_idx in donor_mask
+        )
+    )
+    take = min(needed, available)
+    if take > 0.0 and available > 0.0:
+        scale = max(0.0, (available - take) / available)
+        for block_idx, source_idx in donor_mask:
+            output[block_idx, source_idx, target_idx] *= scale
+    output[0, target_idx, target_idx] = max(desired, current + take)
+    target_l1 = float(np.sum(np.abs(output[:, :, target_idx])))
+    if target_l1 > target_budget + 1e-12:
+        output[:, :, target_idx] *= target_budget / max(target_l1, 1e-12)
+    output[0, target_idx, target_idx] = abs(output[0, target_idx, target_idx])
+    return output, True
 
 
 def project_to_column_budgets(

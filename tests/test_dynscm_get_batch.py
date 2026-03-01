@@ -29,6 +29,25 @@ _RICHNESS_METADATA_KEYS = {
     "sampled_simulation_num_attempts",
     "sampled_simulation_max_abs_value",
     "sampled_train_target_std",
+    "sampled_test_target_std",
+    "sampled_max_abs_target_value",
+    "sampled_probe_r2",
+    "sampled_informative_feature_count",
+    "sampled_informative_feature_std_floor",
+    "sampled_target_parent_count",
+    "sampled_target_self_lag_weight",
+    "sampled_target_had_forced_lag_parent",
+    "sampled_target_had_forced_self_lag",
+    "sampled_mask_channels_enabled",
+    "sampled_noise_scale",
+    "sampled_missing_fraction",
+    "sampled_block_missing_fraction",
+    "sampled_generation_attempts_used",
+    "sampled_low_std_reject_count",
+    "sampled_probe_r2_reject_count",
+    "sampled_clipped_reject_count",
+    "sampled_informative_feature_reject_count",
+    "sampled_missing_reject_count",
     "sampled_filter_accept",
 }
 
@@ -154,6 +173,47 @@ def test_make_get_batch_dynscm_is_deterministic_across_closures(dynscm_api):
 
     _close_if_supported(get_batch_a)
     _close_if_supported(get_batch_b)
+
+
+def test_make_get_batch_dynscm_enforces_target_lag_and_mask_gating(dynscm_api):
+    config_mod, get_batch_mod = dynscm_api
+    cfg = config_mod.DynSCMConfig.from_dict(
+        {
+            "num_variables_min": 3,
+            "num_variables_max": 3,
+            "series_length_min": 96,
+            "series_length_max": 96,
+            "max_lag": 4,
+            "mechanism_type": "linear_var",
+            "noise_family": "normal",
+            "missing_mode": "off",
+            "add_mask_channels": True,
+            "train_rows_min": 6,
+            "train_rows_max": 6,
+            "test_rows_min": 3,
+            "test_rows_max": 3,
+            "enforce_target_lagged_parent": True,
+            "force_target_self_lag_if_parentless": True,
+            "target_self_lag_min_budget_fraction": 0.30,
+            "learnability_probe": True,
+            "informative_feature_std_floor": 1e-3,
+            "min_informative_feature_count": 1,
+        }
+    )
+
+    get_batch = get_batch_mod.make_get_batch_dynscm(
+        cfg,
+        device=torch.device("cpu"),
+        seed=23,
+    )
+    try:
+        batch = get_batch(batch_size=4, num_datapoints_max=12, num_features=20)
+    finally:
+        _close_if_supported(get_batch)
+
+    assert torch.all(batch["sampled_target_parent_count"] >= 1)
+    assert torch.all(batch["sampled_target_self_lag_weight"] > 0)
+    assert torch.all(batch["sampled_mask_channels_enabled"] == 0)
 
 
 def test_make_get_batch_dynscm_parallel_matches_serial(dynscm_api):
@@ -372,6 +432,8 @@ def test_filter_metadata_and_bounded_resampling_are_deterministic(dynscm_api):
         batch_b["sampled_simulation_num_attempts"],
     )
     assert torch.all(batch_a["sampled_filter_accept"] == 0)
+    assert torch.all(batch_a["sampled_generation_attempts_used"] == 2)
+    assert torch.all(batch_a["sampled_low_std_reject_count"] >= 1)
     _close_if_supported(get_batch_a)
     _close_if_supported(get_batch_b)
 

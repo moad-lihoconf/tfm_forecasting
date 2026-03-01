@@ -71,12 +71,24 @@ class DynSCMSampleFilterConfig:
     reject_clipped: bool = False
     max_abs_value_cap: float | None = None
     min_train_target_std: float | None = None
+    min_probe_r2: float | None = None
+    max_probe_r2: float | None = None
+    min_informative_feature_count: int | None = None
+    informative_feature_std_floor: float | None = None
+    max_missing_fraction: float | None = None
+    max_block_missing_fraction: float | None = None
 
     def to_payload(self) -> dict[str, object]:
         return {
             "reject_clipped": bool(self.reject_clipped),
             "max_abs_value_cap": self.max_abs_value_cap,
             "min_train_target_std": self.min_train_target_std,
+            "min_probe_r2": self.min_probe_r2,
+            "max_probe_r2": self.max_probe_r2,
+            "min_informative_feature_count": self.min_informative_feature_count,
+            "informative_feature_std_floor": self.informative_feature_std_floor,
+            "max_missing_fraction": self.max_missing_fraction,
+            "max_block_missing_fraction": self.max_block_missing_fraction,
         }
 
     @classmethod
@@ -88,6 +100,12 @@ class DynSCMSampleFilterConfig:
             return None
         max_abs_value_cap = payload.get("max_abs_value_cap")
         min_train_target_std = payload.get("min_train_target_std")
+        min_probe_r2 = payload.get("min_probe_r2")
+        max_probe_r2 = payload.get("max_probe_r2")
+        min_informative_feature_count = payload.get("min_informative_feature_count")
+        informative_feature_std_floor = payload.get("informative_feature_std_floor")
+        max_missing_fraction = payload.get("max_missing_fraction")
+        max_block_missing_fraction = payload.get("max_block_missing_fraction")
         return cls(
             reject_clipped=bool(payload.get("reject_clipped", False)),
             max_abs_value_cap=(
@@ -100,24 +118,90 @@ class DynSCMSampleFilterConfig:
                 if min_train_target_std is None
                 else float(cast(int | float, min_train_target_std))
             ),
+            min_probe_r2=(
+                None if min_probe_r2 is None else float(cast(int | float, min_probe_r2))
+            ),
+            max_probe_r2=(
+                None if max_probe_r2 is None else float(cast(int | float, max_probe_r2))
+            ),
+            min_informative_feature_count=(
+                None
+                if min_informative_feature_count is None
+                else int(cast(int | float, min_informative_feature_count))
+            ),
+            informative_feature_std_floor=(
+                None
+                if informative_feature_std_floor is None
+                else float(cast(int | float, informative_feature_std_floor))
+            ),
+            max_missing_fraction=(
+                None
+                if max_missing_fraction is None
+                else float(cast(int | float, max_missing_fraction))
+            ),
+            max_block_missing_fraction=(
+                None
+                if max_block_missing_fraction is None
+                else float(cast(int | float, max_block_missing_fraction))
+            ),
         )
 
     def accepts(self, metadata: Mapping[str, object]) -> bool:
+        return self.rejection_reason(metadata) is None
+
+    def rejection_reason(self, metadata: Mapping[str, object]) -> str | None:
         if self.reject_clipped and bool(metadata.get("sampled_simulation_clipped", 0)):
-            return False
+            return "clipped"
         max_abs_value = metadata.get("sampled_simulation_max_abs_value")
         if (
             self.max_abs_value_cap is not None
             and isinstance(max_abs_value, int | float)
             and float(max_abs_value) > self.max_abs_value_cap
         ):
-            return False
+            return "max_abs_value"
         target_std = metadata.get("sampled_train_target_std")
-        return not (
+        if (
             self.min_train_target_std is not None
             and isinstance(target_std, int | float)
             and float(target_std) < self.min_train_target_std
-        )
+        ):
+            return "low_std"
+        probe_r2 = metadata.get("sampled_probe_r2")
+        if self.min_probe_r2 is not None and (
+            not isinstance(probe_r2, int | float)
+            or not np.isfinite(float(probe_r2))
+            or float(probe_r2) < self.min_probe_r2
+        ):
+            return "probe_r2_low"
+        if (
+            self.max_probe_r2 is not None
+            and isinstance(probe_r2, int | float)
+            and np.isfinite(float(probe_r2))
+            and float(probe_r2) > self.max_probe_r2
+        ):
+            return "probe_r2_high"
+        informative_feature_count = metadata.get("sampled_informative_feature_count")
+        if (
+            self.min_informative_feature_count is not None
+            and isinstance(informative_feature_count, int | float)
+            and int(informative_feature_count) < self.min_informative_feature_count
+        ):
+            return "informative_features_low"
+        missing_fraction = metadata.get("sampled_missing_fraction")
+        if (
+            self.max_missing_fraction is not None
+            and isinstance(missing_fraction, int | float)
+            and float(missing_fraction) > self.max_missing_fraction
+        ):
+            return "missing_fraction_high"
+        block_missing_fraction = metadata.get("sampled_block_missing_fraction")
+        if (
+            self.max_block_missing_fraction is not None
+            and isinstance(block_missing_fraction, int | float)
+            and float(block_missing_fraction) > self.max_block_missing_fraction
+        ):
+            return "block_missing_fraction_high"
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +271,59 @@ class LinearPhaseSchedule:
                 )
             prev_end = phase.end_progress
         return np.asarray(self._phases[-1].end_weights, dtype=np.float64)
+
+
+class SelfPacedWeightSchedule(LinearPhaseSchedule):
+    """Alias for readability in curriculum definitions."""
+
+
+class CurriculumProgressGate:
+    """Track whether a scheduler update improved a probe metric."""
+
+    def __init__(self, *, min_improvement: float = 0.0) -> None:
+        self.min_improvement = float(min_improvement)
+        self.best_score: float | None = None
+
+    def accept(self, score: float) -> bool:
+        if self.best_score is None or score >= self.best_score + self.min_improvement:
+            self.best_score = float(score)
+            return True
+        return False
+
+
+class DifficultyBinnedSampler:
+    """Sample named difficulty bins using a progress schedule."""
+
+    def __init__(
+        self,
+        *,
+        bin_names: Sequence[str],
+        schedule: LinearPhaseSchedule,
+        total_batches: int,
+    ) -> None:
+        if not bin_names:
+            raise ValueError("bin_names must be non-empty.")
+        if len(bin_names) != len(schedule.weights_at(0.0)):
+            raise ValueError("bin_names and schedule widths must match.")
+        if total_batches < 1:
+            raise ValueError("total_batches must be >= 1.")
+        self.bin_names = tuple(bin_names)
+        self.schedule = schedule
+        self.total_batches = int(total_batches)
+        self.last_bin_name: str | None = None
+
+    def _progress_for_batch(self, batch_index: int) -> float:
+        if self.total_batches <= 1:
+            return 1.0
+        return min(max(float(batch_index) / float(self.total_batches - 1), 0.0), 1.0)
+
+    def __call__(self, rng: np.random.Generator, batch_index: int) -> str:
+        weights = self.schedule.weights_at(self._progress_for_batch(batch_index))
+        bin_index = int(
+            rng.choice(np.arange(len(self.bin_names), dtype=np.int64), p=weights)
+        )
+        self.last_bin_name = self.bin_names[bin_index]
+        return self.last_bin_name
 
 
 class NamedBatchModeSampler:
