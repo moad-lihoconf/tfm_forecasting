@@ -73,6 +73,10 @@ def test_run_vertex_dynscm_science_group_dry_run_temporal(tmp_path: Path) -> Non
     assert stdout.count("benchmark_compare=enabled") == 6
     assert stdout.count("dynscm_workers=8") == 6
     assert stdout.count("dynscm_worker_blas_threads=1") == 6
+    assert stdout.count("local_eval_steps=16") == 6
+    assert stdout.count("local_audit_steps=16") == 6
+    assert stdout.count("local_compare_steps=16") == 6
+    assert stdout.count("learnability_audit=enabled") == 6
 
 
 def test_run_vertex_dynscm_science_group_dry_run_benchmark(tmp_path: Path) -> None:
@@ -111,6 +115,7 @@ def test_run_vertex_dynscm_science_group_dry_run_benchmark(tmp_path: Path) -> No
     )
     assert stdout.count("learnability_audit=enabled") == 2
     assert stdout.count("prior_audit=enabled") == 2
+    assert stdout.count("local_eval_steps=16") == 2
 
 
 def test_run_vertex_dynscm_science_group_dry_run_normalization(tmp_path: Path) -> None:
@@ -186,3 +191,77 @@ def test_run_vertex_dynscm_science_group_dry_run_allows_worker_overrides(
     stdout = completed.stdout
     assert stdout.count("dynscm_workers=6") == 3
     assert stdout.count("dynscm_worker_blas_threads=2") == 3
+
+
+def test_run_vertex_dynscm_science_group_dry_run_allows_local_step_overrides(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    _write_fake_gcloud(bin_dir)
+
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    completed = subprocess.run(
+        [
+            "bash",
+            "scripts/run_vertex_dynscm_science_group.sh",
+            "--group",
+            "generator_learnability",
+            "--run-prefix",
+            "science-test",
+            "--local-eval-steps",
+            "8",
+            "--local-audit-steps",
+            "10",
+            "--local-compare-steps",
+            "12",
+            "--dry-run",
+        ],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    stdout = completed.stdout
+    assert stdout.count("local_eval_steps=8") == 3
+    assert stdout.count("local_audit_steps=10") == 3
+    assert stdout.count("local_compare_steps=12") == 3
+
+
+def test_run_vertex_dynscm_science_group_dry_run_synthetic_eval_only(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    _write_fake_gcloud(bin_dir)
+
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    completed = subprocess.run(
+        [
+            "bash",
+            "scripts/run_vertex_dynscm_science_group.sh",
+            "--group",
+            "generator_learnability",
+            "--run-prefix",
+            "science-test",
+            "--synthetic-eval-only",
+            "--dry-run",
+        ],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    stdout = completed.stdout
+    assert stdout.count("synthetic_eval=enabled") == 3
+    assert stdout.count("learnability_audit=disabled") == 3
+    assert stdout.count("prior_audit=disabled") == 3
+    assert stdout.count("benchmark_compare=disabled") == 3

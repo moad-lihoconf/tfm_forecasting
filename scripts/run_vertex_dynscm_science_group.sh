@@ -24,6 +24,10 @@ Options:
   --dynscm-workers N        Live DynSCM generation workers (default: 8)
   --dynscm-worker-blas-threads N
                            BLAS threads per DynSCM worker (default: 1)
+  --local-eval-steps N      Synthetic eval steps per suite override (default: 16)
+  --local-audit-steps N     Learnability audit sample steps (default: 16)
+  --local-compare-steps N   Benchmark compare sample steps (default: 16)
+  --synthetic-eval-only     Skip learnability audit and benchmark compare
   --python BIN              Python executable to use locally (default: auto-detect)
   --workdir DIR             Local work directory (default: workdir/research/<run-prefix>)
   --poll-seconds N          Seconds between Vertex job polls (default: 60)
@@ -160,12 +164,16 @@ ACCELERATOR_TYPE="${VERTEX_ACCELERATOR_TYPE:-NVIDIA_L4}"
 ACCELERATOR_COUNT="${VERTEX_ACCELERATOR_COUNT:-1}"
 DYNSCM_WORKERS="${VERTEX_DYNSCM_WORKERS:-8}"
 DYNSCM_WORKER_BLAS_THREADS="${VERTEX_DYNSCM_WORKER_BLAS_THREADS:-1}"
+LOCAL_EVAL_STEPS="${VERTEX_LOCAL_EVAL_STEPS:-16}"
+LOCAL_AUDIT_STEPS="${VERTEX_LOCAL_AUDIT_STEPS:-16}"
+LOCAL_COMPARE_STEPS="${VERTEX_LOCAL_COMPARE_STEPS:-16}"
 PYTHON_BIN_OVERRIDE="${PYTHON_BIN:-}"
 PYTHON_CMD=()
 WORK_ROOT=""
 POLL_SECONDS=60
 STREAM_LOGS=1
 DRY_RUN=0
+SYNTHETIC_EVAL_ONLY=0
 COMMON_WARM_START="gs://tfm-forecasting-vertex-artifacts/tfm_forecasting/runs/dynscm-train-only-20260228-212512-medium-missing-16k/checkpoints/best_checkpoint.pth"
 
 while [[ $# -gt 0 ]]; do
@@ -250,6 +258,34 @@ while [[ $# -gt 0 ]]; do
       DYNSCM_WORKER_BLAS_THREADS="$(require_value --dynscm-worker-blas-threads "${1#*=}")"
       shift
       ;;
+    --local-eval-steps)
+      LOCAL_EVAL_STEPS="$(require_value "$1" "${2-}")"
+      shift 2
+      ;;
+    --local-eval-steps=*)
+      LOCAL_EVAL_STEPS="$(require_value --local-eval-steps "${1#*=}")"
+      shift
+      ;;
+    --local-audit-steps)
+      LOCAL_AUDIT_STEPS="$(require_value "$1" "${2-}")"
+      shift 2
+      ;;
+    --local-audit-steps=*)
+      LOCAL_AUDIT_STEPS="$(require_value --local-audit-steps "${1#*=}")"
+      shift
+      ;;
+    --local-compare-steps)
+      LOCAL_COMPARE_STEPS="$(require_value "$1" "${2-}")"
+      shift 2
+      ;;
+    --local-compare-steps=*)
+      LOCAL_COMPARE_STEPS="$(require_value --local-compare-steps "${1#*=}")"
+      shift
+      ;;
+    --synthetic-eval-only)
+      SYNTHETIC_EVAL_ONLY=1
+      shift
+      ;;
     --python)
       PYTHON_BIN_OVERRIDE="$(require_value "$1" "${2-}")"
       shift 2
@@ -316,6 +352,18 @@ if (( DYNSCM_WORKERS < 1 )); then
 fi
 if (( DYNSCM_WORKER_BLAS_THREADS < 1 )); then
   echo "Error: --dynscm-worker-blas-threads must be >= 1." >&2
+  exit 2
+fi
+if (( LOCAL_EVAL_STEPS < 1 )); then
+  echo "Error: --local-eval-steps must be >= 1." >&2
+  exit 2
+fi
+if (( LOCAL_AUDIT_STEPS < 1 )); then
+  echo "Error: --local-audit-steps must be >= 1." >&2
+  exit 2
+fi
+if (( LOCAL_COMPARE_STEPS < 1 )); then
+  echo "Error: --local-compare-steps must be >= 1." >&2
   exit 2
 fi
 if [[ -z "$PROJECT" ]]; then
@@ -416,10 +464,19 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "[dry-run] warm_start_checkpoint=${COMMON_WARM_START}"
     echo "[dry-run] dynscm_workers=${DYNSCM_WORKERS}"
     echo "[dry-run] dynscm_worker_blas_threads=${DYNSCM_WORKER_BLAS_THREADS}"
+    echo "[dry-run] local_eval_steps=${LOCAL_EVAL_STEPS}"
+    echo "[dry-run] local_audit_steps=${LOCAL_AUDIT_STEPS}"
+    echo "[dry-run] local_compare_steps=${LOCAL_COMPARE_STEPS}"
     echo "[dry-run] synthetic_eval=enabled"
-    echo "[dry-run] learnability_audit=enabled"
-    echo "[dry-run] prior_audit=enabled"
-    echo "[dry-run] benchmark_compare=enabled"
+    if [[ "$SYNTHETIC_EVAL_ONLY" -eq 1 ]]; then
+      echo "[dry-run] learnability_audit=disabled"
+      echo "[dry-run] prior_audit=disabled"
+      echo "[dry-run] benchmark_compare=disabled"
+    else
+      echo "[dry-run] learnability_audit=enabled"
+      echo "[dry-run] prior_audit=enabled"
+      echo "[dry-run] benchmark_compare=enabled"
+    fi
   done
   echo "[dry-run] scorecard_tsv=${SCORECARD_TSV}"
   echo "[dry-run] scorecard_json=${SCORECARD_JSON}"
@@ -461,35 +518,47 @@ for profile in "${PROFILES[@]}"; do
   gcloud storage cp "$checkpoint_uri" "$local_checkpoint" >/dev/null
 
   eval_json="${WORK_ROOT}/eval/${profile}.synthetic_eval.json"
-  printf '[science] local-postprocess profile=%s step=synthetic-eval\n' "$profile"
+  printf '[science] local-postprocess profile=%s step=synthetic-eval eval_steps=%s\n' \
+    "$profile" "$LOCAL_EVAL_STEPS"
   "${PYTHON_CMD[@]}" scripts/eval_dynscm_synthetic_suite.py \
     --checkpoint_path "$local_checkpoint" \
     --research_profile "$profile" \
     --output_json "$eval_json" \
+    --eval_steps "$LOCAL_EVAL_STEPS" \
     --dynscm_workers "$DYNSCM_WORKERS" \
     --dynscm_worker_blas_threads "$DYNSCM_WORKER_BLAS_THREADS"
 
-  learnability_audit_json="${WORK_ROOT}/analysis/${profile}.learnability_audit.json"
-  printf '[science] local-postprocess profile=%s step=learnability-audit\n' "$profile"
-  "${PYTHON_CMD[@]}" scripts/audit_dynscm_learnability.py \
-    --research_profile "$profile" \
-    --source train \
-    --json-out "$learnability_audit_json" \
-    --dynscm_workers "$DYNSCM_WORKERS" \
-    --dynscm_worker_blas_threads "$DYNSCM_WORKER_BLAS_THREADS"
+  learnability_audit_json=""
+  prior_audit_json=""
+  benchmark_compare_json=""
+  benchmark_compare_md=""
+  if [[ "$SYNTHETIC_EVAL_ONLY" -eq 0 ]]; then
+    learnability_audit_json="${WORK_ROOT}/analysis/${profile}.learnability_audit.json"
+    printf '[science] local-postprocess profile=%s step=learnability-audit sample_steps=%s\n' \
+      "$profile" "$LOCAL_AUDIT_STEPS"
+    "${PYTHON_CMD[@]}" scripts/audit_dynscm_learnability.py \
+      --research_profile "$profile" \
+      --source train \
+      --sample_steps "$LOCAL_AUDIT_STEPS" \
+      --json-out "$learnability_audit_json" \
+      --dynscm_workers "$DYNSCM_WORKERS" \
+      --dynscm_worker_blas_threads "$DYNSCM_WORKER_BLAS_THREADS"
 
-  prior_audit_json="${WORK_ROOT}/analysis/${profile}.prior_audit.json"
-  benchmark_compare_json="${WORK_ROOT}/analysis/${profile}.benchmark_compare.json"
-  benchmark_compare_md="${WORK_ROOT}/analysis/${profile}.benchmark_compare.md"
-  printf '[science] local-postprocess profile=%s step=benchmark-compare\n' "$profile"
-  "${PYTHON_CMD[@]}" scripts/compare_live_dynscm_profile_to_forecast_benchmark.py \
-    --research_profile "$profile" \
-    --source train \
-    --json-out "$benchmark_compare_json" \
-    --markdown-out "$benchmark_compare_md" \
-    --prior-audit-json "$prior_audit_json" \
-    --dynscm_workers "$DYNSCM_WORKERS" \
-    --dynscm_worker_blas_threads "$DYNSCM_WORKER_BLAS_THREADS"
+    prior_audit_json="${WORK_ROOT}/analysis/${profile}.prior_audit.json"
+    benchmark_compare_json="${WORK_ROOT}/analysis/${profile}.benchmark_compare.json"
+    benchmark_compare_md="${WORK_ROOT}/analysis/${profile}.benchmark_compare.md"
+    printf '[science] local-postprocess profile=%s step=benchmark-compare sample_steps=%s\n' \
+      "$profile" "$LOCAL_COMPARE_STEPS"
+    "${PYTHON_CMD[@]}" scripts/compare_live_dynscm_profile_to_forecast_benchmark.py \
+      --research_profile "$profile" \
+      --source train \
+      --sample_steps "$LOCAL_COMPARE_STEPS" \
+      --json-out "$benchmark_compare_json" \
+      --markdown-out "$benchmark_compare_md" \
+      --prior-audit-json "$prior_audit_json" \
+      --dynscm_workers "$DYNSCM_WORKERS" \
+      --dynscm_worker_blas_threads "$DYNSCM_WORKER_BLAS_THREADS"
+  fi
 
   readarray -t metrics < <("${PYTHON_CMD[@]}" - <<PY
 import json
@@ -497,25 +566,37 @@ from pathlib import Path
 import torch
 
 eval_payload = json.loads(Path(${eval_json@Q}).read_text(encoding="utf-8"))
-learnability_payload = json.loads(Path(${learnability_audit_json@Q}).read_text(encoding="utf-8"))
-compare_payload = json.loads(Path(${benchmark_compare_json@Q}).read_text(encoding="utf-8"))
 ckpt = torch.load(${local_checkpoint@Q}, map_location="cpu")
 training = ckpt.get("training", {})
 best_val = float(training.get("best_metric", float("nan")))
-top = compare_payload["mismatches"][:3]
-summary = ";".join(f"{item['dimension']}={float(item['score']):.3f}" for item in top)
+learnability_payload = None
+compare_payload = None
+summary = "skipped"
+if ${SYNTHETIC_EVAL_ONLY} == 0:
+    learnability_payload = json.loads(Path(${learnability_audit_json@Q}).read_text(encoding="utf-8"))
+    compare_payload = json.loads(Path(${benchmark_compare_json@Q}).read_text(encoding="utf-8"))
+    top = compare_payload["mismatches"][:3]
+    summary = ";".join(f"{item['dimension']}={float(item['score']):.3f}" for item in top)
 print(best_val)
 print(float(eval_payload["suites"]["target_eval"]["loss"]))
 print(float(eval_payload["suites"]["stable_eval"]["loss"]))
 print(float(eval_payload["suites"].get("temporal_eval_hard", eval_payload["suites"].get("temporal_eval", {})).get("loss", float("nan"))))
 print(float(eval_payload["suites"]["target_eval"]["skipped_fraction"]))
 print(float(eval_payload["suites"]["stable_eval"]["skipped_fraction"]))
-print(float(learnability_payload["rejections"]["low_std_fraction"]))
-print(float(learnability_payload["rejections"]["probe_r2_fraction"]))
-print(float(learnability_payload["rejections"]["clipped_fraction"]))
-print(float(learnability_payload["forced_target_lag_fraction"]))
-print(float(learnability_payload["target_self_lag_weight"]["median"]))
-print(float(learnability_payload["informative_feature_count"]["median"]))
+if learnability_payload is None:
+    print(float("nan"))
+    print(float("nan"))
+    print(float("nan"))
+    print(float("nan"))
+    print(float("nan"))
+    print(float("nan"))
+else:
+    print(float(learnability_payload["rejections"]["low_std_fraction"]))
+    print(float(learnability_payload["rejections"]["probe_r2_fraction"]))
+    print(float(learnability_payload["rejections"]["clipped_fraction"]))
+    print(float(learnability_payload["forced_target_lag_fraction"]))
+    print(float(learnability_payload["target_self_lag_weight"]["median"]))
+    print(float(learnability_payload["informative_feature_count"]["median"]))
 print(summary)
 PY
   )
@@ -534,7 +615,11 @@ PY
   median_informative_feature_count="${metrics[11]}"
   benchmark_mismatch_summary="${metrics[12]}"
   decision="pending_review"
-  notes="eval+learnability_audit+benchmark_compare complete"
+  if [[ "$SYNTHETIC_EVAL_ONLY" -eq 1 ]]; then
+    notes="synthetic_eval_only"
+  else
+    notes="eval+learnability_audit+benchmark_compare complete"
+  fi
 
   printf '[science] local-postprocess profile=%s step=append-scorecard\n' "$profile"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \

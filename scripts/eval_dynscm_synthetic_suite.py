@@ -226,6 +226,12 @@ def main(argv: list[str] | None = None) -> None:
             suite_steps = (
                 int(args.eval_steps) if args.eval_steps is not None else suite.steps
             )
+            print(
+                "[synthetic-eval] suite="
+                f"{suite.name} start steps={suite_steps} batch_size={eval_batch_size} "
+                f"workers={args.dynscm_workers}",
+                flush=True,
+            )
             loader = live_train._build_prior_loader(
                 source=LiveSourceSpec(kind="single", cfg=suite.cfg),
                 num_steps=suite_steps,
@@ -239,11 +245,19 @@ def main(argv: list[str] | None = None) -> None:
                 total_train_batches=max(1, suite_steps),
             )
             try:
-                results["suites"][suite.name] = {
+                suite_metrics = {
                     **_suite_metrics(model=model, loader=loader, device=device),
                     "seed": int(suite.seed),
                     "steps": int(suite_steps),
                 }
+                results["suites"][suite.name] = suite_metrics
+                print(
+                    "[synthetic-eval] suite="
+                    f"{suite.name} done loss={suite_metrics['loss']:.6f} "
+                    f"nrmse={suite_metrics['nrmse']:.6f} "
+                    f"skipped_fraction={suite_metrics['skipped_fraction']:.6f}",
+                    flush=True,
+                )
             finally:
                 loader.close()
 

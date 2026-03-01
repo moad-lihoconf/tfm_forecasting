@@ -120,9 +120,17 @@ def main(argv: list[str] | None = None) -> None:
     informative_feature_reject: list[float] = []
     missing_reject: list[float] = []
     attempts_used: list[float] = []
+    processed_batches = 0
 
     try:
         for batch in loader:
+            processed_batches += 1
+            if processed_batches == 1 or processed_batches % 8 == 0:
+                print(
+                    "[learnability-audit] progress "
+                    f"batch={processed_batches}/{int(args.sample_steps)}",
+                    flush=True,
+                )
             train_target_std.extend(
                 _tensor(batch, "sampled_train_target_std")
                 .detach()
@@ -351,6 +359,14 @@ def main(argv: list[str] | None = None) -> None:
             "missing_fraction": float(sum(missing_reject)) / total_attempts,
         },
     }
+
+    print(
+        "[learnability-audit] done "
+        f"batches={processed_batches} "
+        f"forced_target_lag_fraction={payload['forced_target_lag_fraction']:.6f} "
+        f"forced_target_self_lag_fraction={payload['forced_target_self_lag_fraction']:.6f}",
+        flush=True,
+    )
 
     text = json.dumps(payload, indent=2, sort_keys=True)
     if args.json_out is not None:

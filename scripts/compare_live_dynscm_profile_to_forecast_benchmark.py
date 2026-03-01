@@ -139,9 +139,17 @@ def summarize_live_source(
     missing_ids: list[int] = []
     kernel_ids: list[int] = []
     low_variance_count = 0
+    processed_batches = 0
 
     try:
         for batch in loader:
+            processed_batches += 1
+            if processed_batches == 1 or processed_batches % 8 == 0:
+                print(
+                    "[benchmark-compare] progress "
+                    f"batch={processed_batches}/{sample_steps}",
+                    flush=True,
+                )
             x = _tensor_batch_item(batch, "x").detach().cpu().numpy()
             y = _tensor_batch_item(batch, "y").detach().cpu().numpy()
             sampled_n_train = (
@@ -297,6 +305,11 @@ def summarize_live_source(
         "train_target_std": train_target_std_arr,
         "test_target_std": test_target_std_arr,
     }
+    print(
+        "[benchmark-compare] done "
+        f"batches={processed_batches} tables={int(num_variables_arr.size)}",
+        flush=True,
+    )
     return summary, live_samples
 
 
