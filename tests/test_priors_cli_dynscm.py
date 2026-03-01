@@ -273,7 +273,8 @@ def test_dynscm_cli_benchmark_aligned_profile_matches_benchmark_contract(
         "reject_clipped": True,
         "max_abs_value_cap": 1000.0,
         "min_train_target_std": 1e-3,
-        "min_probe_r2": 0.02,
+        "min_probe_train_r2": 0.02,
+        "max_probe_train_r2": 0.99,
         "min_informative_feature_count": 10,
         "informative_feature_std_floor": 1e-3,
     }
@@ -348,11 +349,14 @@ def test_dynscm_cli_benchmark_contract_observed_profiles_match_contract(
         assert cfg["mechanism_type"] == "linear_var"
         assert cfg["noise_family"] == "normal"
         assert cfg["kernel_family"] == "exp_decay"
+        if profile_name == "benchmark_contract_observed_easy":
+            assert cfg["series_length_min"] == 64
         assert cfg["series_length_max"] == expected_max_series
         assert cfg["num_regimes"] == expected_regimes
         assert cfg["enforce_target_lagged_parent"] is True
         assert cfg["force_target_self_lag_if_parentless"] is True
-        assert cfg["target_self_lag_min_budget_fraction"] == 0.4
+        assert cfg["target_self_lag_min_budget_fraction"] == 0.7
+        assert cfg["target_self_lag_abs_min"] == 0.55
         assert cfg["disable_mask_channels_when_missing_off"] is True
         assert cfg["learnability_probe"] is True
         assert cfg["informative_feature_std_floor"] == 1e-3
@@ -361,7 +365,8 @@ def test_dynscm_cli_benchmark_contract_observed_profiles_match_contract(
             "reject_clipped": True,
             "max_abs_value_cap": 1000.0,
             "min_train_target_std": 1e-3,
-            "min_probe_r2": 0.02,
+            "min_probe_train_r2": 0.02,
+            "max_probe_train_r2": 0.99,
             "min_informative_feature_count": 8,
             "informative_feature_std_floor": 1e-3,
         }
@@ -426,7 +431,7 @@ def test_dynscm_cli_benchmark_aligned_easy_profile_is_deliberately_low_diversity
     assert metadata["dynscm_config"]["train_rows_max"] == 32
     assert metadata["dynscm_config"]["test_rows_min"] == 16
     assert metadata["dynscm_config"]["test_rows_max"] == 16
-    assert metadata["dynscm_config"]["forecast_horizons"] == [1, 3, 6, 12]
+    assert metadata["dynscm_config"]["forecast_horizons"] == [1, 3]
     assert metadata["dynscm_config"]["explicit_lags"] == [0, 1, 2, 5, 10]
     assert metadata["dynscm_config"]["num_kernels"] == 3
     assert metadata["dynscm_config"]["num_regimes"] == 1
@@ -494,7 +499,7 @@ def test_dynscm_cli_benchmark_aligned_easy_plus_profile_adds_only_small_diversit
     assert metadata["dynscm_config"]["train_rows_max"] == 32
     assert metadata["dynscm_config"]["test_rows_min"] == 16
     assert metadata["dynscm_config"]["test_rows_max"] == 16
-    assert metadata["dynscm_config"]["forecast_horizons"] == [1, 3, 6, 12]
+    assert metadata["dynscm_config"]["forecast_horizons"] == [1, 3]
     assert metadata["dynscm_config"]["num_regimes"] == 1
     assert metadata["dynscm_config"]["use_contemp_edges"] is False
     assert metadata["dynscm_config"]["max_lagged_parents"] == 2
@@ -859,7 +864,7 @@ def test_dynscm_cli_benchmark_aligned_medium_profile_is_moderately_diverse(
     assert metadata["dynscm_config"]["train_rows_max"] == 32
     assert metadata["dynscm_config"]["test_rows_min"] == 16
     assert metadata["dynscm_config"]["test_rows_max"] == 16
-    assert metadata["dynscm_config"]["forecast_horizons"] == [1, 3, 6, 12]
+    assert metadata["dynscm_config"]["forecast_horizons"] == [1, 3]
     assert metadata["dynscm_config"]["explicit_lags"] == [0, 1, 2, 5, 10]
     assert metadata["dynscm_config"]["num_kernels"] == 3
     assert metadata["dynscm_config"]["num_regimes"] == 2

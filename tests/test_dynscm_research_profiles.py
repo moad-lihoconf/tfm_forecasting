@@ -55,6 +55,7 @@ def test_temporal_cfg_preserves_only_temporal_changes_vs_easy_family_stable(
         "num_regimes",
         "sticky_rho",
         "drift_std",
+        "series_length_min",
         "series_length_max",
     }
 
@@ -119,10 +120,11 @@ def test_benchmark_contract_profiles_match_benchmark_shape_contract(
     priors_modules,
 ) -> None:
     profiles_mod = priors_modules["research_profiles"]
-    for name in (
-        "benchmark_contract_observed_easy",
-        "benchmark_contract_observed_temporal",
-    ):
+    expected_series = {
+        "benchmark_contract_observed_easy": (64, 128),
+        "benchmark_contract_observed_temporal": (128, 256),
+    }
+    for name in expected_series:
         cfg = profiles_mod.get_research_profile(name).train_source.cfg
         assert cfg.num_variables_min == 2
         assert cfg.num_variables_max == 2
@@ -130,7 +132,7 @@ def test_benchmark_contract_profiles_match_benchmark_shape_contract(
         assert cfg.train_rows_max == 32
         assert cfg.test_rows_min == 16
         assert cfg.test_rows_max == 16
-        assert cfg.forecast_horizons == (1, 3)
+        assert cfg.forecast_horizons == (1, 3, 6, 12)
         assert cfg.explicit_lags == (0, 1, 2, 5, 10)
         assert cfg.num_kernels == 3
         assert cfg.add_mask_channels is False
@@ -140,6 +142,7 @@ def test_benchmark_contract_profiles_match_benchmark_shape_contract(
         assert cfg.kernel_family == "exp_decay"
         assert cfg.enforce_target_lagged_parent is True
         assert cfg.learnability_probe is True
+        assert (cfg.series_length_min, cfg.series_length_max) == expected_series[name]
 
 
 def test_revised_research_profiles_use_only_short_horizons(priors_modules) -> None:
@@ -151,14 +154,25 @@ def test_revised_research_profiles_use_only_short_horizons(priors_modules) -> No
         "medium32k_live_mode_ladder",
         "medium32k_live_mixture",
         *profiles_mod.TEMPORAL_ABLATION_PROFILES,
+    ):
+        profile = profiles_mod.get_research_profile(name)
+        if profile.train_source.cfg is not None:
+            assert profile.train_source.cfg.forecast_horizons == (1, 2, 3)
+        if profile.val_source.cfg is not None:
+            assert profile.val_source.cfg.forecast_horizons == (1, 2, 3)
+
+
+def test_benchmark_contract_profiles_preserve_eval_horizons(priors_modules) -> None:
+    profiles_mod = priors_modules["research_profiles"]
+    for name in (
         "benchmark_contract_observed_easy",
         "benchmark_contract_observed_temporal",
     ):
         profile = profiles_mod.get_research_profile(name)
-        if profile.train_source.cfg is not None:
-            assert profile.train_source.cfg.forecast_horizons == (1, 3)
-        if profile.val_source.cfg is not None:
-            assert profile.val_source.cfg.forecast_horizons == (1, 3)
+        assert profile.train_source.cfg is not None
+        assert profile.val_source.cfg is not None
+        assert profile.train_source.cfg.forecast_horizons == (1, 3, 6, 12)
+        assert profile.val_source.cfg.forecast_horizons == (1, 3, 6, 12)
 
 
 def test_temporal_profiles_use_shorter_common_budget(priors_modules) -> None:
@@ -227,7 +241,31 @@ def test_research_profiles_default_to_nonzero_weight_decay_and_stronger_self_lag
 
     assert profile.training_budget.weight_decay == 1e-4
     assert profile.train_source.cfg is not None
-    assert profile.train_source.cfg.target_self_lag_min_budget_fraction == 0.40
+    assert profile.train_source.cfg.target_self_lag_min_budget_fraction == 0.70
+    assert profile.train_source.cfg.target_self_lag_abs_min == 0.55
+    assert profile.train_source.cfg.noise_scale_schedule_tag is None
+
+
+def test_surviving_curriculum_profiles_use_shorter_early_series_windows(
+    priors_modules,
+) -> None:
+    profiles_mod = priors_modules["research_profiles"]
+
+    mode_ladder = profiles_mod.get_research_profile("medium32k_live_mode_ladder")
+    mode_map = {
+        mode.name: mode.cfg_overrides for mode in mode_ladder.train_source.modes
+    }
+    assert mode_map["graph_only"]["series_length_min"] == 64
+    assert mode_map["graph_only"]["series_length_max"] == 128
+    assert mode_map["temporal_only"]["series_length_min"] == 96
+    assert mode_map["temporal_only"]["series_length_max"] == 128
+
+    mixture = profiles_mod.get_research_profile("medium32k_live_mixture")
+    child_sources = {name: cfg for name, cfg in mixture.train_source.child_sources}
+    assert child_sources["stable_cfg"].series_length_min == 64
+    assert child_sources["stable_cfg"].series_length_max == 128
+    assert child_sources["temporal_cfg"].series_length_min == 96
+    assert child_sources["temporal_cfg"].series_length_max == 128
 
 
 def test_build_promotion_profile_upgrades_training_source_to_full_cfg(
