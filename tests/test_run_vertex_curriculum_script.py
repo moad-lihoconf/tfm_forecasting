@@ -42,7 +42,7 @@ def test_run_vertex_curriculum_dry_run_prints_stage_plan(tmp_path: Path) -> None
             "--from-stage",
             "benchmark_aligned_easy_16k",
             "--to-stage",
-            "benchmark_aligned_mechanism_16k",
+            "benchmark_aligned_medium_graph_16k",
             "--dry-run",
         ],
         cwd=repo_root,
@@ -73,8 +73,12 @@ def test_run_vertex_curriculum_dry_run_prints_stage_plan(tmp_path: Path) -> None
         "curriculum-test-easy-16k/checkpoints/best_checkpoint.pth"
     ) in stdout
 
-    assert "[dry-run] stage=benchmark_aligned_mechanism_16k" in stdout
-    assert "run_name=curriculum-test-mechanism-16k" in stdout
+    assert "[dry-run] stage=benchmark_aligned_medium_graph_16k" in stdout
+    assert "run_name=curriculum-test-medium-graph-16k" in stdout
+    assert (
+        "warm_start_checkpoint=gs://test-bucket/tfm_forecasting/runs/"
+        "curriculum-test-easy-plus-16k/checkpoints/best_checkpoint.pth"
+    ) in stdout
     assert stdout.count("early_stopping_patience=10") == 1
     assert stdout.count("early_stopping_min_delta=1e-5") == 2
     assert "stream_logs=enabled" in stdout

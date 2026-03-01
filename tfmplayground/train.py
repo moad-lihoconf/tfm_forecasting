@@ -884,10 +884,22 @@ def train(
             if improved:
                 torch.save(training_state, work_dir + "/best_checkpoint.pth")
 
+            val_part = f"| val_loss {metrics.get('val_loss', float('nan')):.5f} "
+            if regression_task and regression_loss_name == "mse":
+                train_rmse = float("nan")
+                if mean_loss >= 0:
+                    train_rmse = float(mean_loss**0.5)
+                val_rmse = float(metrics.get("val_rmse", float("nan")))
+                val_part = (
+                    f"| train_rmse {train_rmse:.5f} "
+                    f"| val_loss {metrics.get('val_loss', float('nan')):.5f} "
+                    f"| val_rmse {val_rmse:.5f} "
+                )
+
             print(
                 f"Epoch {epoch:5d} | time {end_time - epoch_start_time:5.2f}s "
                 f"| train_loss {metrics['train_loss']:.5f} "
-                f"| val_loss {metrics.get('val_loss', float('nan')):.5f} "
+                f"{val_part}"
                 f"| best_{metric_name} {best_metric:.5f} "
                 f"| patience {patience_counter}/{patience}",
                 flush=True,

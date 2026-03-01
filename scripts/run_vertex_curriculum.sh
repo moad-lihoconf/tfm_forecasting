@@ -23,13 +23,19 @@ Options:
   --poll-seconds N          Seconds between Vertex job polls (default: 60)
   --stream-logs             Stream Vertex logs for each stage (default: enabled)
   --no-stream-logs          Disable log streaming and only poll job state
+  --benchmark-slice         Run a fixed benchmark slice after each stage (default: enabled)
+  --no-benchmark-slice      Disable benchmark slice evaluation
+  --benchmark-device DEV    Benchmark device: cpu|cuda (default: cpu)
+  --benchmark-max-series N  Max series per dataset for the slice (default: 64)
+  --benchmark-threshold P   Max allowed relative degradation vs prev stage (default: 0.03)
+  --benchmark-datasets CSV  Comma-separated dataset names (default: exchange_rate,ettm1)
   --dry-run                 Print the full plan without running commands
   -h, --help                Show help
 
 Stages:
   benchmark_aligned_easy_16k
   benchmark_aligned_easy_plus_16k
-  benchmark_aligned_mechanism_16k
+  benchmark_aligned_medium_graph_16k
   benchmark_aligned_medium_noise_16k
   benchmark_aligned_medium_missing_16k
   benchmark_aligned_medium_32k
@@ -116,6 +122,11 @@ TO_STAGE="benchmark_aligned_full_32k"
 POLL_SECONDS=60
 STREAM_LOGS=1
 DRY_RUN=0
+BENCHMARK_SLICE=1
+BENCHMARK_DEVICE="cpu"
+BENCHMARK_MAX_SERIES=64
+BENCHMARK_THRESHOLD=0.03
+BENCHMARK_DATASETS="exchange_rate,ettm1"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -215,6 +226,46 @@ while [[ $# -gt 0 ]]; do
       POLL_SECONDS="$(require_value --poll-seconds "${1#*=}")"
       shift
       ;;
+    --benchmark-slice)
+      BENCHMARK_SLICE=1
+      shift
+      ;;
+    --no-benchmark-slice)
+      BENCHMARK_SLICE=0
+      shift
+      ;;
+    --benchmark-device)
+      BENCHMARK_DEVICE="$(require_value "$1" "${2-}")"
+      shift 2
+      ;;
+    --benchmark-device=*)
+      BENCHMARK_DEVICE="$(require_value --benchmark-device "${1#*=}")"
+      shift
+      ;;
+    --benchmark-max-series)
+      BENCHMARK_MAX_SERIES="$(require_value "$1" "${2-}")"
+      shift 2
+      ;;
+    --benchmark-max-series=*)
+      BENCHMARK_MAX_SERIES="$(require_value --benchmark-max-series "${1#*=}")"
+      shift
+      ;;
+    --benchmark-threshold)
+      BENCHMARK_THRESHOLD="$(require_value "$1" "${2-}")"
+      shift 2
+      ;;
+    --benchmark-threshold=*)
+      BENCHMARK_THRESHOLD="$(require_value --benchmark-threshold "${1#*=}")"
+      shift
+      ;;
+    --benchmark-datasets)
+      BENCHMARK_DATASETS="$(require_value "$1" "${2-}")"
+      shift 2
+      ;;
+    --benchmark-datasets=*)
+      BENCHMARK_DATASETS="$(require_value --benchmark-datasets "${1#*=}")"
+      shift
+      ;;
     --stream-logs)
       STREAM_LOGS=1
       shift
@@ -272,12 +323,16 @@ PRIOR_DIR="${WORK_ROOT}/priors"
 AUDIT_DIR="${WORK_ROOT}/audits"
 LOG_DIR="${WORK_ROOT}/logs"
 SUMMARY_FILE="${WORK_ROOT}/curriculum_summary.tsv"
-mkdir -p "$PRIOR_DIR" "$AUDIT_DIR" "$LOG_DIR"
+EVAL_DIR="${WORK_ROOT}/eval"
+SCORECARD_FILE="${WORK_ROOT}/curriculum_scorecard.tsv"
+mkdir -p "$PRIOR_DIR" "$AUDIT_DIR" "$LOG_DIR" "$EVAL_DIR"
 
+# The automated ladder follows the current evidence-backed diversity-axis
+# curriculum; legacy exploratory stages remain available only as manual priors.
 STAGES=(
   benchmark_aligned_easy_16k
   benchmark_aligned_easy_plus_16k
-  benchmark_aligned_mechanism_16k
+  benchmark_aligned_medium_graph_16k
   benchmark_aligned_medium_noise_16k
   benchmark_aligned_medium_missing_16k
   benchmark_aligned_medium_32k
@@ -300,7 +355,7 @@ stage_run_suffix() {
   case "$1" in
     benchmark_aligned_easy_16k) echo "easy-16k" ;;
     benchmark_aligned_easy_plus_16k) echo "easy-plus-16k" ;;
-    benchmark_aligned_mechanism_16k) echo "mechanism-16k" ;;
+    benchmark_aligned_medium_graph_16k) echo "medium-graph-16k" ;;
     benchmark_aligned_medium_noise_16k) echo "medium-noise-16k" ;;
     benchmark_aligned_medium_missing_16k) echo "medium-missing-16k" ;;
     benchmark_aligned_medium_32k) echo "medium-32k" ;;
@@ -478,9 +533,68 @@ print_stage_plan() {
   else
     printf '  warm_start_checkpoint=<none>\n'
   fi
+  if [[ "$BENCHMARK_SLICE" -eq 1 ]]; then
+    printf '  benchmark_slice=enabled (%s max_series=%s device=%s threshold=%s)\n' \
+      "$BENCHMARK_DATASETS" "$BENCHMARK_MAX_SERIES" "$BENCHMARK_DEVICE" "$BENCHMARK_THRESHOLD"
+  else
+    printf '  benchmark_slice=disabled\n'
+  fi
 }
 
 printf 'stage\trun_name\tprofile\tjob_id\tcheckpoint_uri\tstatus\n' > "$SUMMARY_FILE"
+printf 'stage\trun_name\tjob_id\ttarget_y_std_mean\ttrain_loss\tval_loss\tval_rmse\tval_nrmse\tslice_dynscm_rmse\tslice_dynscm_mase\tslice_standard_rmse\tslice_standard_mase\tgate\n' > "$SCORECARD_FILE"
+
+_read_audit_field() {
+  local json_path="$1"
+  local key="$2"
+  "${PYTHON_CMD[@]}" - <<PY
+import json
+with open(${json_path!r}, "r", encoding="utf-8") as f:
+    payload = json.load(f)
+value = payload.get(${key!r})
+print("nan" if value is None else str(value))
+PY
+}
+
+_read_ckpt_metric_triplet() {
+  local ckpt_path="$1"
+  "${PYTHON_CMD[@]}" - <<PY
+import math
+import torch
+ckpt = torch.load(${ckpt_path!r}, map_location="cpu")
+metrics = ckpt.get("metrics", {}) if isinstance(ckpt, dict) else {}
+train_loss = float(metrics.get("train_loss", float("nan")))
+val_loss = float(metrics.get("val_loss", float("nan")))
+val_rmse = float(
+    metrics.get(
+        "val_rmse",
+        math.sqrt(val_loss) if math.isfinite(val_loss) and val_loss >= 0 else float("nan"),
+    )
+)
+print(f"{train_loss}\t{val_loss}\t{val_rmse}")
+PY
+}
+
+_bench_means_for_model() {
+  local rows_csv="$1"
+  local model_name="$2"
+  "${PYTHON_CMD[@]}" - <<PY
+import pandas as pd
+df = pd.read_csv(${rows_csv!r})
+ok = df[(df["status"] == "ok") & (df["model"] == ${model_name!r})]
+if ok.empty:
+    print("nan\tnan")
+else:
+    rmse = float(ok["rmse"].mean())
+    mase = float(ok["mase"].mean())
+    print(f"{rmse}\t{mase}")
+PY
+}
+
+PREV_STAGE=""
+PREV_DYNSCM_RMSE=""
+PREV_DYNSCM_MASE=""
+GATED_STOP=0
 
 for i in "${!STAGES[@]}"; do
   if (( i < FROM_INDEX || i > TO_INDEX )); then
@@ -570,11 +684,98 @@ for i in "${!STAGES[@]}"; do
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$stage" "$run_name" "$stage" "$job_id" "$(checkpoint_uri_for_stage "$stage")" "succeeded" >> "$SUMMARY_FILE"
   echo "[curriculum] stage ${stage} completed"
+
+  if [[ "$BENCHMARK_SLICE" -eq 1 ]]; then
+    stage_eval_dir="${EVAL_DIR}/${stage}"
+    mkdir -p "$stage_eval_dir"
+    local_ckpt="${stage_eval_dir}/best_checkpoint.pth"
+    echo "[curriculum] downloading checkpoint for stage ${stage}"
+    gcloud storage cp "$(checkpoint_uri_for_stage "$stage")" "$local_ckpt"
+
+    target_std_mean="$(_read_audit_field "$audit_json" "target_y_std_mean")"
+    IFS=$'\t' read -r train_loss val_loss val_rmse < <(_read_ckpt_metric_triplet "$local_ckpt")
+    val_nrmse="$("${PYTHON_CMD[@]}" - <<PY
+import math
+try:
+    val_rmse = float(${val_rmse!r})
+    target_std = float(${target_std_mean!r})
+except Exception:
+    print("nan")
+    raise SystemExit(0)
+if not (math.isfinite(val_rmse) and math.isfinite(target_std) and target_std > 0):
+    print("nan")
+else:
+    print(str(val_rmse / target_std))
+PY
+)"
+
+    bench_out="${stage_eval_dir}/benchmark_slice"
+    echo "[curriculum] running benchmark slice for stage ${stage}"
+    bash scripts/run_benchmark_slice.sh \
+      --ckpt "$local_ckpt" \
+      --output_dir "$bench_out" \
+      --device "$BENCHMARK_DEVICE" \
+      --max-series "$BENCHMARK_MAX_SERIES" \
+      --datasets "$BENCHMARK_DATASETS"
+
+    rows_csv="${bench_out}/regression_rows.csv"
+    if [[ ! -f "$rows_csv" ]]; then
+      echo "[curriculum] benchmark did not produce regression_rows.csv; stopping." >&2
+      exit 1
+    fi
+
+    IFS=$'\t' read -r dynscm_rmse dynscm_mase < <(_bench_means_for_model "$rows_csv" "nanotabpfn_dynscm")
+    IFS=$'\t' read -r std_rmse std_mase < <(_bench_means_for_model "$rows_csv" "nanotabpfn_standard")
+
+    gate="na"
+    if [[ -n "$PREV_DYNSCM_RMSE" && -n "$PREV_DYNSCM_MASE" ]]; then
+      gate="$("${PYTHON_CMD[@]}" - <<PY
+import math
+prev_rmse = float(${PREV_DYNSCM_RMSE!r})
+prev_mase = float(${PREV_DYNSCM_MASE!r})
+cur_rmse = float(${dynscm_rmse!r})
+cur_mase = float(${dynscm_mase!r})
+thr = float(${BENCHMARK_THRESHOLD!r})
+if not all(math.isfinite(v) for v in (prev_rmse, prev_mase, cur_rmse, cur_mase)):
+    print("fail_nonfinite")
+elif prev_rmse <= 0 or prev_mase <= 0:
+    print("na")
+else:
+    rmse_rel = (cur_rmse - prev_rmse) / prev_rmse
+    mase_rel = (cur_mase - prev_mase) / prev_mase
+    if rmse_rel > thr or mase_rel > thr:
+        print("fail_degrade")
+    else:
+        print("pass")
+PY
+)"
+    fi
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$stage" "$run_name" "$job_id" "$target_std_mean" "$train_loss" "$val_loss" "$val_rmse" "$val_nrmse" \
+      "$dynscm_rmse" "$dynscm_mase" "$std_rmse" "$std_mase" "$gate" >> "$SCORECARD_FILE"
+
+    if [[ "$gate" == "fail_degrade" || "$gate" == "fail_nonfinite" ]]; then
+      echo "[curriculum] gate failed at stage ${stage} (prev=${PREV_STAGE}); stopping curriculum here." >&2
+      GATED_STOP=1
+      break
+    fi
+
+    PREV_STAGE="$stage"
+    PREV_DYNSCM_RMSE="$dynscm_rmse"
+    PREV_DYNSCM_MASE="$dynscm_mase"
+  fi
 done
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "[dry-run] summary_file=${SUMMARY_FILE}"
+  echo "[dry-run] scorecard_file=${SCORECARD_FILE}"
 else
-  echo "[curriculum] all requested stages completed"
+  if [[ "$GATED_STOP" -eq 1 ]]; then
+    echo "[curriculum] stopped early due to benchmark gate"
+  else
+    echo "[curriculum] all requested stages completed"
+  fi
   echo "[curriculum] summary_file=${SUMMARY_FILE}"
+  echo "[curriculum] scorecard_file=${SCORECARD_FILE}"
 fi
