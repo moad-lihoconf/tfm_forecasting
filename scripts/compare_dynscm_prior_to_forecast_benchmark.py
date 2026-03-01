@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import h5py
 import numpy as np
@@ -167,8 +167,8 @@ def summarize_prior_dump(
     priordump: str,
     *,
     sample_limit: int | None = 4096,
-) -> tuple[dict[str, object], dict[str, np.ndarray]]:
-    audit = audit_prior_dump(priordump, sample_limit=sample_limit)
+) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
+    audit = cast(dict[str, Any], audit_prior_dump(priordump, sample_limit=sample_limit))
     metadata = _load_dump_metadata(priordump)
     dynscm_cfg = metadata.get("dynscm_config")
     dynscm_cfg = dynscm_cfg if isinstance(dynscm_cfg, dict) else {}
@@ -311,7 +311,7 @@ def summarize_benchmark(
     *,
     dataset_limit: int | None = None,
     series_limit: int | None = None,
-) -> tuple[dict[str, object], dict[str, np.ndarray]]:
+) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
     loaded_suite = load_suite(cfg)
     protocol = cfg.protocol
     benchmark_num_vars = 2
@@ -459,12 +459,15 @@ def summarize_benchmark(
 
 
 def build_mismatch_report(
-    prior_summary: dict[str, object],
+    prior_summary: dict[str, Any],
     prior_samples: dict[str, np.ndarray],
-    benchmark_summary: dict[str, object],
+    benchmark_summary: dict[str, Any],
     benchmark_samples: dict[str, np.ndarray],
-) -> list[dict[str, object]]:
-    prior_missing = prior_summary.get("missing_mode_distribution", {})
+) -> list[dict[str, Any]]:
+    prior_missing = cast(
+        dict[str, float],
+        prior_summary.get("missing_mode_distribution", {}),
+    )
     benchmark_missing = {"observed_data": 1.0}
     mismatches = [
         {
@@ -605,7 +608,7 @@ def build_mismatch_report(
     )
 
 
-def build_markdown_report(payload: dict[str, object]) -> str:
+def build_markdown_report(payload: dict[str, Any]) -> str:
     lines = [
         "# DynSCM Prior vs Forecast Benchmark",
         "",

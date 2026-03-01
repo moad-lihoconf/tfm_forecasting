@@ -264,6 +264,78 @@ def test_dynscm_cli_benchmark_aligned_profile_matches_benchmark_contract(
     assert metadata["dynscm_config"]["add_mask_channels"] is True
 
 
+def test_dynscm_cli_benchmark_contract_observed_profiles_match_contract(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    for profile_name, expected_max_series, expected_regimes in (
+        ("benchmark_contract_observed_easy", 128, 1),
+        ("benchmark_contract_observed_temporal", 256, 2),
+    ):
+        output_path = tmp_path / f"{profile_name}.h5"
+        cmd = [
+            sys.executable,
+            "-m",
+            "tfmplayground.priors",
+            "--lib",
+            "dynscm",
+            "--dynscm_profile",
+            profile_name,
+            "--num_batches",
+            "1",
+            "--batch_size",
+            "1",
+            "--max_classes",
+            "0",
+            "--np_seed",
+            "31",
+            "--dynscm_seed",
+            "31",
+            "--dynscm_workers",
+            "1",
+            "--dynscm_worker_blas_threads",
+            "1",
+            "--no_dynscm_compute_spectral_diagnostics",
+            "--save_path",
+            str(output_path),
+        ]
+        subprocess.run(
+            cmd,
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        with h5py.File(output_path, "r") as f:
+            raw_metadata = f["dump_metadata_json"][()]
+            metadata_text = (
+                raw_metadata.decode("utf-8")
+                if isinstance(raw_metadata, bytes)
+                else str(raw_metadata)
+            )
+            metadata = json.loads(metadata_text)
+
+        cfg = metadata["dynscm_config"]
+        assert metadata["dynscm_profile"] == profile_name
+        assert cfg["num_variables_min"] == 2
+        assert cfg["num_variables_max"] == 2
+        assert cfg["train_rows_min"] == 32
+        assert cfg["train_rows_max"] == 32
+        assert cfg["test_rows_min"] == 16
+        assert cfg["test_rows_max"] == 16
+        assert cfg["forecast_horizons"] == [1, 3, 6, 12]
+        assert cfg["explicit_lags"] == [0, 1, 2, 5, 10]
+        assert cfg["num_kernels"] == 3
+        assert cfg["add_mask_channels"] is True
+        assert cfg["missing_mode"] == "off"
+        assert cfg["mechanism_type"] == "linear_var"
+        assert cfg["noise_family"] == "normal"
+        assert cfg["kernel_family"] == "exp_decay"
+        assert cfg["series_length_max"] == expected_max_series
+        assert cfg["num_regimes"] == expected_regimes
+
+
 def test_dynscm_cli_benchmark_aligned_easy_profile_is_deliberately_low_diversity(
     tmp_path: Path,
 ):
