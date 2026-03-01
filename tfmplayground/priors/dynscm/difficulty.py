@@ -208,6 +208,36 @@ def ridge_probe_r2_holdout(
     return _r2_score(y_test, predictions)
 
 
+def ridge_holdout_predictions(
+    x: np.ndarray,
+    y: np.ndarray,
+    *,
+    n_train: int,
+    alpha: float = 1e-3,
+) -> np.ndarray:
+    x_matrix = _as_row_matrix(x)
+    y_vector = _as_vector(y)
+    if x_matrix.shape[0] != y_vector.shape[0]:
+        raise ValueError("x and y must agree on row dimension.")
+    if n_train <= 1 or n_train >= x_matrix.shape[0]:
+        return np.zeros((max(x_matrix.shape[0] - n_train, 0),), dtype=np.float64)
+    x_train_std, y_train, mean, safe_std_arr = _ridge_design_matrices(
+        x_matrix,
+        y_vector,
+        n_train=n_train,
+    )
+    x_test = x_matrix[n_train:]
+    if x_test.shape[0] == 0:
+        return np.zeros((0,), dtype=np.float64)
+    x_test_std = (x_test - mean) / safe_std_arr
+    return _ridge_predict(
+        x_train_std,
+        y_train,
+        x_test_std,
+        alpha=alpha,
+    )
+
+
 def classify_difficulty(
     *,
     probe_r2: float | None,

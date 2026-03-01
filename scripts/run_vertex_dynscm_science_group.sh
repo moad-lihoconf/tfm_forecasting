@@ -528,6 +528,30 @@ for profile in "${PROFILES[@]}"; do
     --dynscm_workers "$DYNSCM_WORKERS" \
     --dynscm_worker_blas_threads "$DYNSCM_WORKER_BLAS_THREADS"
 
+  trace_summary_uri="${BUCKET_PREFIX}/tfm_forecasting/runs/${run_name}/metadata/train_trace_summary.json"
+  local_trace_summary="${WORK_ROOT}/artifacts/${profile}.train_trace_summary.json"
+  printf '[science] local-postprocess profile=%s step=download-trace-summary uri=%s\n' \
+    "$profile" "$trace_summary_uri"
+  if gcloud storage cp "$trace_summary_uri" "$local_trace_summary" >/dev/null 2>&1; then
+    "${PYTHON_CMD[@]}" - <<PY
+import json
+from pathlib import Path
+
+payload = json.loads(Path(${local_trace_summary@Q}).read_text(encoding="utf-8"))
+print(
+    "[science] trace-summary "
+    f"profile=${profile@Q} "
+    f"skipped_fraction={payload.get('skipped_fraction')} "
+    f"valid_supervised_targets_mean={payload.get('valid_supervised_targets', {}).get('mean')} "
+    f"decoder_linear2_weight_update_norm_mean={payload.get('decoder_linear2_weight_update_norm', {}).get('mean')} "
+    f"grad_clipping_fraction={payload.get('grad_clipping_fraction')}",
+    flush=True,
+)
+PY
+  else
+    printf '[science] trace-summary profile=%s status=missing\n' "$profile"
+  fi
+
   learnability_audit_json=""
   prior_audit_json=""
   benchmark_compare_json=""

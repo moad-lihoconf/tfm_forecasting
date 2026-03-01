@@ -432,6 +432,7 @@ def test_filtered_generation_raises_after_bounded_resampling(dynscm_api):
 
 def test_probe_metrics_expose_train_and_holdout_scores() -> None:
     from tfmplayground.priors.dynscm.difficulty import (
+        ridge_holdout_predictions,
         ridge_probe_r2_holdout,
         ridge_probe_r2_train,
     )
@@ -441,6 +442,10 @@ def test_probe_metrics_expose_train_and_holdout_scores() -> None:
 
     assert ridge_probe_r2_train(x, y, n_train=4) > 0.99
     assert ridge_probe_r2_holdout(x, y, n_train=4) < -0.9
+    preds = ridge_holdout_predictions(x, y, n_train=4)
+    assert preds.shape == (2,)
+    assert preds[0] > 50.0
+    assert preds[1] > 50.0
 
 
 def test_filter_uses_train_probe_r2_over_holdout_alias() -> None:

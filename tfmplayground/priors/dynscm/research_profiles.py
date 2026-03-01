@@ -124,7 +124,8 @@ class DynSCMLiveResearchProfile:
     val_seed: int
     target_normalization: Literal[
         "none", "per_function_zscore", "per_function_clamped"
-    ] = "none"
+    ] = "per_function_clamped"
+    target_std_floor: float = 5e-2
     max_seq_len: int = LIVE_MAX_SEQ_LEN
     max_features: int = LIVE_MAX_FEATURES
 

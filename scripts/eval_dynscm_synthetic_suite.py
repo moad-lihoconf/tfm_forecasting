@@ -7,12 +7,14 @@ import shutil
 from pathlib import Path
 from typing import Literal, cast
 
+import numpy as np
 import torch
 
 import pretrain_regression_dynscm_live as live_train
 from pretrain_regression import _prepare_output_path
 from tfmplayground.gcs_utils import path_for_read, upload_local_file_to_gcs
 from tfmplayground.model import NanoTabPFNModel
+from tfmplayground.priors.dynscm.difficulty import ridge_holdout_predictions
 from tfmplayground.priors.dynscm.research_profiles import (
     LiveSourceSpec,
     get_research_profile,
@@ -46,14 +48,55 @@ def _suite_metrics(
     model: NanoTabPFNModel,
     loader,
     device: torch.device,
-) -> dict[str, float | int]:
+) -> dict[str, float | int | dict[str, dict[str, float | int]]]:
     model.eval()
-    squared_error_sum = 0.0
-    target_sum = 0.0
-    target_sq_sum = 0.0
-    target_count = 0
-    skipped_batches = 0
     total_batches = 0
+    metric_state = {
+        "model": {
+            "squared_error_sum": 0.0,
+            "target_sum": 0.0,
+            "target_sq_sum": 0.0,
+            "target_count": 0,
+            "skipped_batches": 0,
+        },
+        "context_mean": {
+            "squared_error_sum": 0.0,
+            "target_sum": 0.0,
+            "target_sq_sum": 0.0,
+            "target_count": 0,
+            "skipped_batches": 0,
+        },
+        "ridge": {
+            "squared_error_sum": 0.0,
+            "target_sum": 0.0,
+            "target_sq_sum": 0.0,
+            "target_count": 0,
+            "skipped_batches": 0,
+        },
+    }
+
+    def _prediction_metrics(
+        predictions: torch.Tensor,
+        targets: torch.Tensor,
+        mask: torch.Tensor | None,
+    ) -> tuple[float, float, float, int, bool]:
+        preds = predictions.to(torch.float32)
+        target_values = targets.to(torch.float32)
+        if mask is not None:
+            if not torch.any(mask):
+                return 0.0, 0.0, 0.0, 0, True
+            preds = preds[mask]
+            target_values = target_values[mask]
+        if not torch.isfinite(preds).all() or not torch.isfinite(target_values).all():
+            return 0.0, 0.0, 0.0, 0, True
+        errors = preds - target_values
+        return (
+            float(torch.sum(errors * errors).item()),
+            float(torch.sum(target_values).item()),
+            float(torch.sum(target_values * target_values).item()),
+            int(target_values.numel()),
+            False,
+        )
 
     def _evaluate_subset(
         x_batch: torch.Tensor,
@@ -62,7 +105,7 @@ def _suite_metrics(
         target_mask_batch: torch.Tensor | None,
         num_datapoints_batch: int | torch.Tensor | None,
         eval_pos: int,
-    ) -> tuple[float, float, float, int, bool]:
+    ) -> dict[str, tuple[float, float, float, int, bool]]:
         if torch.is_tensor(num_datapoints_batch):
             max_num_datapoints = int(
                 cast(torch.Tensor, num_datapoints_batch).max().item()
@@ -84,23 +127,53 @@ def _suite_metrics(
         outputs = model((x_batch, y_batch[:, :eval_pos]), single_eval_pos=eval_pos)
         if outputs.ndim == targets.ndim + 1 and outputs.shape[-1] == 1:
             outputs = outputs.squeeze(-1)
-        outputs = outputs.to(torch.float32)
-        targets = targets.to(torch.float32)
-        if mask is not None:
-            if not torch.any(mask):
-                return 0.0, 0.0, 0.0, 0, True
-            outputs = outputs[mask]
-            targets = targets[mask]
-        if not torch.isfinite(outputs).all() or not torch.isfinite(targets).all():
-            return 0.0, 0.0, 0.0, 0, True
-        errors = outputs - targets
-        return (
-            float(torch.sum(errors * errors).item()),
-            float(torch.sum(targets).item()),
-            float(torch.sum(targets * targets).item()),
-            int(targets.numel()),
-            False,
-        )
+        context = y_batch[:, :eval_pos].to(torch.float32)
+        if context.shape[1] > 0:
+            context_mean = context.mean(dim=1, keepdim=True).expand_as(targets)
+        else:
+            context_mean = torch.zeros_like(targets, dtype=torch.float32)
+
+        ridge_predictions = torch.zeros_like(targets, dtype=torch.float32)
+        x_cpu = x_batch.detach().to("cpu", dtype=torch.float32)
+        y_cpu = target_y_batch.detach().to("cpu", dtype=torch.float32)
+        if torch.is_tensor(num_datapoints_batch):
+            row_lengths = (
+                num_datapoints_batch.detach().to("cpu", dtype=torch.long).tolist()
+            )
+        else:
+            row_lengths = [max_num_datapoints] * x_batch.shape[0]
+        for row_idx, row_total in enumerate(row_lengths):
+            row_total = int(max(0, min(int(row_total), max_num_datapoints)))
+            if row_total <= eval_pos:
+                continue
+            preds_np = ridge_holdout_predictions(
+                x_cpu[row_idx, :row_total].numpy(),
+                y_cpu[row_idx, :row_total].numpy(),
+                n_train=eval_pos,
+            )
+            if preds_np.size == 0:
+                continue
+            ridge_predictions[row_idx, : preds_np.shape[0]] = torch.from_numpy(
+                np.asarray(preds_np, dtype=np.float32)
+            ).to(device)
+
+        return {
+            "model": _prediction_metrics(outputs, targets, mask),
+            "context_mean": _prediction_metrics(context_mean, targets, mask),
+            "ridge": _prediction_metrics(ridge_predictions, targets, mask),
+        }
+
+    def _merge_metrics(
+        state: dict[str, float | int],
+        metrics: tuple[float, float, float, int, bool],
+    ) -> None:
+        sse, total, sq_total, count, skipped = metrics
+        state["squared_error_sum"] = float(state["squared_error_sum"]) + sse
+        state["target_sum"] = float(state["target_sum"]) + total
+        state["target_sq_sum"] = float(state["target_sq_sum"]) + sq_total
+        state["target_count"] = int(state["target_count"]) + count
+        if skipped or count == 0:
+            state["skipped_batches"] = int(state["skipped_batches"]) + 1
 
     with torch.no_grad():
         for batch in loader:
@@ -119,16 +192,16 @@ def _suite_metrics(
             batch_count = 0
             batch_skipped = False
             if isinstance(single_eval_pos, int):
-                batch_sse, batch_sum, batch_sq_sum, batch_count, batch_skipped = (
-                    _evaluate_subset(
-                        x,
-                        y,
-                        target_y,
-                        target_mask,
-                        num_datapoints,
-                        int(single_eval_pos),
-                    )
+                subset_metrics = _evaluate_subset(
+                    x,
+                    y,
+                    target_y,
+                    target_mask,
+                    num_datapoints,
+                    int(single_eval_pos),
                 )
+                for baseline_name, baseline_metrics in subset_metrics.items():
+                    _merge_metrics(metric_state[baseline_name], baseline_metrics)
             elif torch.is_tensor(single_eval_pos):
                 eval_positions = single_eval_pos.to(device=device, dtype=torch.long)
                 for eval_pos in torch.unique(eval_positions).tolist():
@@ -138,7 +211,7 @@ def _suite_metrics(
                         if torch.is_tensor(num_datapoints)
                         else num_datapoints
                     )
-                    sse, total, sq_total, count, skipped = _evaluate_subset(
+                    subset_metrics = _evaluate_subset(
                         x[row_mask],
                         y[row_mask],
                         target_y[row_mask],
@@ -146,41 +219,48 @@ def _suite_metrics(
                         sub_num_datapoints,
                         int(eval_pos),
                     )
-                    batch_sse += sse
-                    batch_sum += total
-                    batch_sq_sum += sq_total
-                    batch_count += count
-                    batch_skipped = batch_skipped or skipped
+                    for baseline_name, baseline_metrics in subset_metrics.items():
+                        _merge_metrics(metric_state[baseline_name], baseline_metrics)
             else:
                 raise ValueError("Unsupported single_eval_pos payload.")
-            squared_error_sum += batch_sse
-            target_sum += batch_sum
-            target_sq_sum += batch_sq_sum
-            target_count += batch_count
-            if batch_skipped or batch_count == 0:
-                skipped_batches += 1
 
-    loss = float("nan")
-    rmse = float("nan")
-    nrmse = float("nan")
-    target_std = float("nan")
-    if target_count > 0:
-        loss = squared_error_sum / target_count
-        rmse = math.sqrt(loss) if loss >= 0.0 else float("nan")
-        mean = target_sum / target_count
-        variance = max((target_sq_sum / target_count) - (mean * mean), 0.0)
-        target_std = math.sqrt(variance)
-        if math.isfinite(rmse) and target_std > 0.0:
-            nrmse = rmse / target_std
+    def _finalize_metrics(state: dict[str, float | int]) -> dict[str, float | int]:
+        target_count = int(state["target_count"])
+        loss = float("nan")
+        rmse = float("nan")
+        nrmse = float("nan")
+        target_std = float("nan")
+        if target_count > 0:
+            loss = float(state["squared_error_sum"]) / target_count
+            rmse = math.sqrt(loss) if loss >= 0.0 else float("nan")
+            mean = float(state["target_sum"]) / target_count
+            variance = max(
+                (float(state["target_sq_sum"]) / target_count) - (mean * mean),
+                0.0,
+            )
+            target_std = math.sqrt(variance)
+            if math.isfinite(rmse) and target_std > 0.0:
+                nrmse = rmse / target_std
+        return {
+            "loss": float(loss),
+            "rmse": float(rmse),
+            "nrmse": float(nrmse),
+            "skipped_fraction": (
+                float(int(state["skipped_batches"]) / total_batches)
+                if total_batches > 0
+                else 0.0
+            ),
+            "num_targets": int(target_count),
+            "target_std": float(target_std),
+        }
+
+    model_metrics = _finalize_metrics(metric_state["model"])
     return {
-        "loss": float(loss),
-        "rmse": float(rmse),
-        "nrmse": float(nrmse),
-        "skipped_fraction": (
-            float(skipped_batches / total_batches) if total_batches > 0 else 0.0
-        ),
-        "num_targets": int(target_count),
-        "target_std": float(target_std),
+        **model_metrics,
+        "baselines": {
+            "context_mean": _finalize_metrics(metric_state["context_mean"]),
+            "ridge": _finalize_metrics(metric_state["ridge"]),
+        },
     }
 
 
@@ -255,6 +335,8 @@ def main(argv: list[str] | None = None) -> None:
                     "[synthetic-eval] suite="
                     f"{suite.name} done loss={suite_metrics['loss']:.6f} "
                     f"nrmse={suite_metrics['nrmse']:.6f} "
+                    f"context_mean_nrmse={suite_metrics['baselines']['context_mean']['nrmse']:.6f} "
+                    f"ridge_nrmse={suite_metrics['baselines']['ridge']['nrmse']:.6f} "
                     f"skipped_fraction={suite_metrics['skipped_fraction']:.6f}",
                     flush=True,
                 )

@@ -216,6 +216,16 @@ def test_normalization_ablation_profiles_only_change_target_normalization(
 ) -> None:
     profiles_mod = priors_modules["research_profiles"]
     assert (
+        profiles_mod.get_research_profile(
+            "medium32k_live_mode_ladder"
+        ).target_normalization
+        == "per_function_clamped"
+    )
+    assert (
+        profiles_mod.get_research_profile("medium32k_live_mode_ladder").target_std_floor
+        == 5e-2
+    )
+    assert (
         profiles_mod.get_research_profile("mode_ladder_norm_none").target_normalization
         == "none"
     )

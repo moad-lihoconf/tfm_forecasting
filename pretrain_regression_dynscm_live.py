@@ -147,7 +147,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         choices=["per_function_zscore", "per_function_clamped", "none"],
     )
-    parser.add_argument("--target_std_floor", type=float, default=1e-2)
+    parser.add_argument("--target_std_floor", type=float, default=None)
     parser.add_argument("--min_train_target_std", type=float, default=1e-3)
     parser.add_argument(
         "--feature_normalization",
@@ -347,6 +347,7 @@ def _run_config_payload(
     loadcheckpoint: str | None,
     warm_start: bool,
     resolved_target_normalization: str,
+    resolved_target_std_floor: float,
 ) -> dict[str, object]:
     return {
         "research_profile": profile.name,
@@ -362,7 +363,7 @@ def _run_config_payload(
             "optimizer": args.optimizer,
             "regression_loss": args.regression_loss,
             "target_normalization": resolved_target_normalization,
-            "target_std_floor": float(args.target_std_floor),
+            "target_std_floor": float(resolved_target_std_floor),
             "min_train_target_std": float(args.min_train_target_std),
             "feature_normalization": args.feature_normalization,
             "debug_output_clamp": args.debug_output_clamp,
@@ -428,6 +429,11 @@ def main(argv: list[str] | None = None) -> None:
         args.target_normalization
         if args.target_normalization is not None
         else profile.target_normalization
+    )
+    resolved_target_std_floor = (
+        float(args.target_std_floor)
+        if args.target_std_floor is not None
+        else float(profile.target_std_floor)
     )
 
     resolved_budget: ResolvedBudget = {
@@ -501,7 +507,7 @@ def main(argv: list[str] | None = None) -> None:
         raise ValueError("--dynscm_worker_blas_threads must be >= 1.")
     if args.huber_delta <= 0.0:
         raise ValueError("--huber_delta must be > 0.")
-    if args.target_std_floor <= 0.0:
+    if resolved_target_std_floor <= 0.0:
         raise ValueError("--target_std_floor must be > 0.")
     if args.min_train_target_std < 0.0:
         raise ValueError("--min_train_target_std must be >= 0.")
@@ -552,10 +558,24 @@ def main(argv: list[str] | None = None) -> None:
                 "target_normalization",
                 ckpt.get("training", {}).get("target_normalization", "none"),
             )
-            if checkpoint_target_normalization != resolved_target_normalization:
+            if (
+                checkpoint_target_normalization != resolved_target_normalization
+                and not effective_warm_start
+            ):
                 raise ValueError(
                     "Checkpoint target_normalization does not match requested "
                     "--target_normalization."
+                )
+            if (
+                checkpoint_target_normalization != resolved_target_normalization
+                and effective_warm_start
+            ):
+                print(
+                    "Warm-start checkpoint target_normalization "
+                    f"{checkpoint_target_normalization!r} differs from requested "
+                    f"{resolved_target_normalization!r}; continuing because "
+                    "--warm_start resets optimizer/training state.",
+                    flush=True,
                 )
             checkpoint_feature_normalization = ckpt.get(
                 "architecture",
@@ -699,7 +719,7 @@ def main(argv: list[str] | None = None) -> None:
             optimizer_name=args.optimizer,
             regression_loss_name=args.regression_loss,
             target_normalization=resolved_target_normalization,
-            target_std_floor=args.target_std_floor,
+            target_std_floor=resolved_target_std_floor,
             min_train_target_std=args.min_train_target_std,
             debug_trace_path=local_debug_trace_path,
             debug_trace_first_n_batches=resolved_budget["debug_trace_first_n_batches"],
@@ -739,6 +759,7 @@ def main(argv: list[str] | None = None) -> None:
                         loadcheckpoint=effective_loadcheckpoint,
                         warm_start=effective_warm_start,
                         resolved_target_normalization=resolved_target_normalization,
+                        resolved_target_std_floor=resolved_target_std_floor,
                     ),
                     indent=2,
                     sort_keys=True,
@@ -788,6 +809,7 @@ def main(argv: list[str] | None = None) -> None:
                 loadcheckpoint=effective_loadcheckpoint,
                 warm_start=effective_warm_start,
                 resolved_target_normalization=resolved_target_normalization,
+                resolved_target_std_floor=resolved_target_std_floor,
             ),
         }
 
@@ -838,7 +860,7 @@ def main(argv: list[str] | None = None) -> None:
                     ),
                     "target_std_floor": train_info.get(
                         "target_std_floor",
-                        args.target_std_floor,
+                        resolved_target_std_floor,
                     ),
                     "min_train_target_std": train_info.get(
                         "min_train_target_std",
