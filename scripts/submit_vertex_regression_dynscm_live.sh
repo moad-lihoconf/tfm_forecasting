@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 usage() {
   cat <<'USAGE'
 Usage: scripts/submit_vertex_regression_dynscm_live.sh --research-profile NAME [OPTIONS] [-- <extra pretrain args>]
@@ -303,6 +305,9 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   rm -f "$CONFIG_FILE"
   exit 0
 fi
+
+echo "Refreshing GPU image: bash ${SCRIPT_DIR}/update_docker_gpu.sh --push"
+bash "${SCRIPT_DIR}/update_docker_gpu.sh" --push
 
 echo "Submitting Vertex custom job: ${DISPLAY_NAME}"
 "${SUBMIT_CMD[@]}"
