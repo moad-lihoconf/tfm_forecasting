@@ -9,6 +9,7 @@ import sys
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import h5py
 import numpy as np
@@ -28,6 +29,39 @@ try:
     from .dataloader import TabPFNPriorDataLoader  # type: ignore[attr-defined]
 except ImportError:  # pragma: no cover - legacy optional integration.
     TabPFNPriorDataLoader = None
+
+
+_LEARNABILITY_GUARDRAIL_OVERRIDES = (
+    "enforce_target_lagged_parent=true",
+    "force_target_self_lag_if_parentless=true",
+    "target_self_lag_min_budget_fraction=0.40",
+    "target_self_lag_abs_min=0.20",
+    "disable_mask_channels_when_missing_off=true",
+    "learnability_probe=true",
+    "learnability_probe_min_r2=0.02",
+    "informative_feature_std_floor=1e-3",
+)
+_BENCHMARK_LEARNABILITY_OVERRIDES = (
+    *_LEARNABILITY_GUARDRAIL_OVERRIDES,
+    "min_informative_feature_count=10",
+)
+_BENCHMARK_CONTRACT_LEARNABILITY_OVERRIDES = (
+    *_LEARNABILITY_GUARDRAIL_OVERRIDES,
+    "min_informative_feature_count=8",
+)
+_BENCHMARK_SAMPLE_FILTER_PAYLOAD = {
+    "reject_clipped": True,
+    "max_abs_value_cap": 1000.0,
+    "min_train_target_std": 1e-3,
+    "min_probe_r2": 0.02,
+    "min_informative_feature_count": 10,
+    "informative_feature_std_floor": 1e-3,
+}
+_BENCHMARK_CONTRACT_SAMPLE_FILTER_PAYLOAD = {
+    **_BENCHMARK_SAMPLE_FILTER_PAYLOAD,
+    "min_informative_feature_count": 8,
+}
+_BENCHMARK_MAX_SAMPLE_ATTEMPTS = 16
 
 
 _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
@@ -88,6 +122,8 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
             "max_features": 64,
             "max_classes": 0,
         },
+        "sample_filter": _BENCHMARK_SAMPLE_FILTER_PAYLOAD,
+        "max_sample_attempts_per_item": _BENCHMARK_MAX_SAMPLE_ATTEMPTS,
         "dynscm_overrides": [
             "num_variables_min=2",
             "num_variables_max=2",
@@ -126,6 +162,7 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
             "num_kernels=3",
             "max_feature_lag=32",
             "add_mask_channels=true",
+            *_BENCHMARK_LEARNABILITY_OVERRIDES,
         ],
     },
     "benchmark_aligned_easy_16k": {
@@ -136,6 +173,8 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
             "max_features": 64,
             "max_classes": 0,
         },
+        "sample_filter": _BENCHMARK_SAMPLE_FILTER_PAYLOAD,
+        "max_sample_attempts_per_item": _BENCHMARK_MAX_SAMPLE_ATTEMPTS,
         "dynscm_overrides": [
             "num_variables_min=2",
             "num_variables_max=2",
@@ -170,7 +209,8 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
             "explicit_lags=[0,1,2,5,10]",
             "num_kernels=3",
             "max_feature_lag=32",
-            "add_mask_channels=true",
+            "add_mask_channels=false",
+            *_BENCHMARK_LEARNABILITY_OVERRIDES,
         ],
     },
     "benchmark_aligned_easy_plus_16k": {
@@ -181,6 +221,8 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
             "max_features": 64,
             "max_classes": 0,
         },
+        "sample_filter": _BENCHMARK_SAMPLE_FILTER_PAYLOAD,
+        "max_sample_attempts_per_item": _BENCHMARK_MAX_SAMPLE_ATTEMPTS,
         "dynscm_overrides": [
             "num_variables_min=2",
             "num_variables_max=2",
@@ -217,7 +259,8 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
             "explicit_lags=[0,1,2,5,10]",
             "num_kernels=3",
             "max_feature_lag=32",
-            "add_mask_channels=true",
+            "add_mask_channels=false",
+            *_BENCHMARK_LEARNABILITY_OVERRIDES,
         ],
     },
     # Retained as legacy exploratory profiles; the recommended automated
@@ -230,6 +273,8 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
             "max_features": 64,
             "max_classes": 0,
         },
+        "sample_filter": _BENCHMARK_SAMPLE_FILTER_PAYLOAD,
+        "max_sample_attempts_per_item": _BENCHMARK_MAX_SAMPLE_ATTEMPTS,
         "dynscm_overrides": [
             "num_variables_min=2",
             "num_variables_max=2",
@@ -266,7 +311,8 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
             "explicit_lags=[0,1,2,5,10]",
             "num_kernels=3",
             "max_feature_lag=32",
-            "add_mask_channels=true",
+            "add_mask_channels=false",
+            *_BENCHMARK_LEARNABILITY_OVERRIDES,
         ],
     },
     "benchmark_aligned_edges_soft_16k": {
@@ -279,6 +325,8 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
         },
         # Adds only a small amount of structural graph drift (lagged edge
         # add/del) on top of the mechanism-mix stage.
+        "sample_filter": _BENCHMARK_SAMPLE_FILTER_PAYLOAD,
+        "max_sample_attempts_per_item": _BENCHMARK_MAX_SAMPLE_ATTEMPTS,
         "dynscm_overrides": [
             "num_variables_min=2",
             "num_variables_max=2",
@@ -315,7 +363,8 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
             "explicit_lags=[0,1,2,5,10]",
             "num_kernels=3",
             "max_feature_lag=32",
-            "add_mask_channels=true",
+            "add_mask_channels=false",
+            *_BENCHMARK_LEARNABILITY_OVERRIDES,
         ],
     },
     "benchmark_aligned_medium_graph_16k": {
@@ -326,6 +375,8 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
             "max_features": 64,
             "max_classes": 0,
         },
+        "sample_filter": _BENCHMARK_SAMPLE_FILTER_PAYLOAD,
+        "max_sample_attempts_per_item": _BENCHMARK_MAX_SAMPLE_ATTEMPTS,
         "dynscm_overrides": [
             "num_variables_min=2",
             "num_variables_max=2",
@@ -362,7 +413,8 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
             "explicit_lags=[0,1,2,5,10]",
             "num_kernels=3",
             "max_feature_lag=32",
-            "add_mask_channels=true",
+            "add_mask_channels=false",
+            *_BENCHMARK_LEARNABILITY_OVERRIDES,
         ],
     },
     "benchmark_aligned_medium_noise_16k": {
@@ -373,6 +425,8 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
             "max_features": 64,
             "max_classes": 0,
         },
+        "sample_filter": _BENCHMARK_SAMPLE_FILTER_PAYLOAD,
+        "max_sample_attempts_per_item": _BENCHMARK_MAX_SAMPLE_ATTEMPTS,
         "dynscm_overrides": [
             "num_variables_min=2",
             "num_variables_max=2",
@@ -412,7 +466,8 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
             "explicit_lags=[0,1,2,5,10]",
             "num_kernels=3",
             "max_feature_lag=32",
-            "add_mask_channels=true",
+            "add_mask_channels=false",
+            *_BENCHMARK_LEARNABILITY_OVERRIDES,
         ],
     },
     "benchmark_aligned_medium_missing_16k": {
@@ -423,6 +478,8 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
             "max_features": 64,
             "max_classes": 0,
         },
+        "sample_filter": _BENCHMARK_SAMPLE_FILTER_PAYLOAD,
+        "max_sample_attempts_per_item": _BENCHMARK_MAX_SAMPLE_ATTEMPTS,
         "dynscm_overrides": [
             "num_variables_min=2",
             "num_variables_max=2",
@@ -464,6 +521,7 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
             "num_kernels=3",
             "max_feature_lag=32",
             "add_mask_channels=true",
+            *_BENCHMARK_LEARNABILITY_OVERRIDES,
         ],
     },
     "benchmark_aligned_medium_32k": {
@@ -474,6 +532,8 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
             "max_features": 64,
             "max_classes": 0,
         },
+        "sample_filter": _BENCHMARK_SAMPLE_FILTER_PAYLOAD,
+        "max_sample_attempts_per_item": _BENCHMARK_MAX_SAMPLE_ATTEMPTS,
         "dynscm_overrides": [
             "num_variables_min=2",
             "num_variables_max=2",
@@ -515,6 +575,7 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
             "num_kernels=3",
             "max_feature_lag=32",
             "add_mask_channels=true",
+            *_BENCHMARK_LEARNABILITY_OVERRIDES,
         ],
     },
     "benchmark_aligned_32k": {
@@ -525,6 +586,8 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
             "max_features": 64,
             "max_classes": 0,
         },
+        "sample_filter": _BENCHMARK_SAMPLE_FILTER_PAYLOAD,
+        "max_sample_attempts_per_item": _BENCHMARK_MAX_SAMPLE_ATTEMPTS,
         "dynscm_overrides": [
             "num_variables_min=2",
             "num_variables_max=2",
@@ -563,6 +626,7 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
             "num_kernels=3",
             "max_feature_lag=32",
             "add_mask_channels=true",
+            *_BENCHMARK_LEARNABILITY_OVERRIDES,
         ],
     },
     # Backward-compatible explicit name for the richest benchmark-aligned profile.
@@ -574,6 +638,8 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
             "max_features": 64,
             "max_classes": 0,
         },
+        "sample_filter": _BENCHMARK_SAMPLE_FILTER_PAYLOAD,
+        "max_sample_attempts_per_item": _BENCHMARK_MAX_SAMPLE_ATTEMPTS,
         "dynscm_overrides": [
             "num_variables_min=2",
             "num_variables_max=2",
@@ -612,6 +678,7 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
             "num_kernels=3",
             "max_feature_lag=32",
             "add_mask_channels=true",
+            *_BENCHMARK_LEARNABILITY_OVERRIDES,
         ],
     },
     "benchmark_contract_observed_easy": {
@@ -622,6 +689,8 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
             "max_features": 64,
             "max_classes": 0,
         },
+        "sample_filter": _BENCHMARK_CONTRACT_SAMPLE_FILTER_PAYLOAD,
+        "max_sample_attempts_per_item": _BENCHMARK_MAX_SAMPLE_ATTEMPTS,
         "dynscm_overrides": [
             "num_variables_min=2",
             "num_variables_max=2",
@@ -631,7 +700,7 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
             "test_rows_max=16",
             "series_length_min=128",
             "series_length_max=128",
-            "forecast_horizons=[1,3,6,12]",
+            "forecast_horizons=[1,3]",
             "num_regimes=1",
             "sticky_rho=1.0",
             "shared_order=true",
@@ -656,7 +725,8 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
             "explicit_lags=[0,1,2,5,10]",
             "num_kernels=3",
             "max_feature_lag=32",
-            "add_mask_channels=true",
+            "add_mask_channels=false",
+            *_BENCHMARK_CONTRACT_LEARNABILITY_OVERRIDES,
         ],
     },
     "benchmark_contract_observed_temporal": {
@@ -667,6 +737,8 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
             "max_features": 64,
             "max_classes": 0,
         },
+        "sample_filter": _BENCHMARK_CONTRACT_SAMPLE_FILTER_PAYLOAD,
+        "max_sample_attempts_per_item": _BENCHMARK_MAX_SAMPLE_ATTEMPTS,
         "dynscm_overrides": [
             "num_variables_min=2",
             "num_variables_max=2",
@@ -676,7 +748,7 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
             "test_rows_max=16",
             "series_length_min=128",
             "series_length_max=256",
-            "forecast_horizons=[1,3,6,12]",
+            "forecast_horizons=[1,3]",
             "num_regimes=2",
             "sticky_rho=0.95",
             "shared_order=true",
@@ -701,7 +773,8 @@ _DYNSCM_PROFILES: dict[str, dict[str, object]] = {
             "explicit_lags=[0,1,2,5,10]",
             "num_kernels=3",
             "max_feature_lag=32",
-            "add_mask_channels=true",
+            "add_mask_channels=false",
+            *_BENCHMARK_CONTRACT_LEARNABILITY_OVERRIDES,
         ],
     },
 }
@@ -772,6 +845,55 @@ def _write_dump_metadata(save_path: str, metadata: dict[str, object]) -> None:
             data=json.dumps(metadata, sort_keys=True),
             dtype=h5py.string_dtype(),
         )
+
+
+def _resolve_dynscm_sample_filter_payload(
+    *,
+    selected_profile: dict[str, object],
+    args: argparse.Namespace,
+) -> dict[str, object] | None:
+    payload = selected_profile.get("sample_filter")
+    resolved = dict(payload) if isinstance(payload, dict) else {}
+
+    if args.dynscm_reject_clipped is not None:
+        resolved["reject_clipped"] = bool(args.dynscm_reject_clipped)
+    if args.dynscm_max_abs_value_cap is not None:
+        resolved["max_abs_value_cap"] = float(args.dynscm_max_abs_value_cap)
+    if args.dynscm_min_train_target_std is not None:
+        resolved["min_train_target_std"] = float(args.dynscm_min_train_target_std)
+    if args.dynscm_min_probe_r2 is not None:
+        resolved["min_probe_r2"] = float(args.dynscm_min_probe_r2)
+    if args.dynscm_max_probe_r2 is not None:
+        resolved["max_probe_r2"] = float(args.dynscm_max_probe_r2)
+    if args.dynscm_min_informative_feature_count is not None:
+        resolved["min_informative_feature_count"] = int(
+            args.dynscm_min_informative_feature_count
+        )
+    if args.dynscm_informative_feature_std_floor is not None:
+        resolved["informative_feature_std_floor"] = float(
+            args.dynscm_informative_feature_std_floor
+        )
+    if args.dynscm_max_missing_fraction is not None:
+        resolved["max_missing_fraction"] = float(args.dynscm_max_missing_fraction)
+    if args.dynscm_max_block_missing_fraction is not None:
+        resolved["max_block_missing_fraction"] = float(
+            args.dynscm_max_block_missing_fraction
+        )
+
+    return resolved or None
+
+
+def _resolve_dynscm_max_sample_attempts(
+    *,
+    selected_profile: dict[str, object],
+    args: argparse.Namespace,
+) -> int:
+    if args.dynscm_max_sample_attempts_per_item is not None:
+        return int(args.dynscm_max_sample_attempts_per_item)
+    profile_value = selected_profile.get("max_sample_attempts_per_item")
+    if profile_value is None:
+        return 1
+    return int(cast(int | float | str, profile_value))
 
 
 def main():
@@ -925,6 +1047,66 @@ def main():
         action="store_false",
         help="Disable optional spectral-radius diagnostics for DynSCM.",
     )
+    parser.add_argument(
+        "--dynscm_reject_clipped",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Reject clipped DynSCM samples and resample during prior dumping.",
+    )
+    parser.add_argument(
+        "--dynscm_max_abs_value_cap",
+        type=float,
+        default=None,
+        help="Maximum abs(series) cap for DynSCM sample rejection.",
+    )
+    parser.add_argument(
+        "--dynscm_min_train_target_std",
+        type=float,
+        default=None,
+        help="Minimum training target std for DynSCM sample rejection.",
+    )
+    parser.add_argument(
+        "--dynscm_min_probe_r2",
+        type=float,
+        default=None,
+        help="Minimum probe R^2 for DynSCM sample rejection.",
+    )
+    parser.add_argument(
+        "--dynscm_max_probe_r2",
+        type=float,
+        default=None,
+        help="Maximum probe R^2 for DynSCM sample rejection.",
+    )
+    parser.add_argument(
+        "--dynscm_min_informative_feature_count",
+        type=int,
+        default=None,
+        help="Minimum informative feature count for DynSCM sample rejection.",
+    )
+    parser.add_argument(
+        "--dynscm_informative_feature_std_floor",
+        type=float,
+        default=None,
+        help="Std floor used when counting informative DynSCM features.",
+    )
+    parser.add_argument(
+        "--dynscm_max_missing_fraction",
+        type=float,
+        default=None,
+        help="Maximum overall missing fraction for DynSCM sample rejection.",
+    )
+    parser.add_argument(
+        "--dynscm_max_block_missing_fraction",
+        type=float,
+        default=None,
+        help="Maximum block missing fraction for DynSCM sample rejection.",
+    )
+    parser.add_argument(
+        "--dynscm_max_sample_attempts_per_item",
+        type=int,
+        default=None,
+        help="Maximum DynSCM generation attempts per item before fallback.",
+    )
 
     raw_argv = sys.argv[1:]
     args = parser.parse_args(raw_argv)
@@ -968,6 +1150,8 @@ def main():
     # infer the problem_type from max_classes
     problem_type = "classification" if args.max_classes > 0 else "regression"
     dynscm_cfg: DynSCMConfig | None = None
+    dynscm_sample_filter_payload: dict[str, object] | None = None
+    dynscm_max_sample_attempts_per_item = 1
 
     if args.lib == "ticl":
         prior = TICLPriorDataLoader(
@@ -995,6 +1179,8 @@ def main():
             **tabpfn_config,
         )
     elif args.lib == "dynscm":
+        from .dynscm.research import DynSCMSampleFilterConfig
+
         resolved_dynscm_overrides = profile_dynscm_overrides + list(
             args.dynscm_override
         )
@@ -1013,6 +1199,19 @@ def main():
         dynscm_seed = args.dynscm_seed
         if dynscm_seed is None:
             dynscm_seed = args.np_seed
+        dynscm_sample_filter_payload = _resolve_dynscm_sample_filter_payload(
+            selected_profile=selected_dynscm_profile,
+            args=args,
+        )
+        dynscm_sample_filter = DynSCMSampleFilterConfig.from_payload(
+            dynscm_sample_filter_payload
+        )
+        dynscm_max_sample_attempts_per_item = _resolve_dynscm_max_sample_attempts(
+            selected_profile=selected_dynscm_profile,
+            args=args,
+        )
+        if dynscm_max_sample_attempts_per_item < 1:
+            parser.error("--dynscm_max_sample_attempts_per_item must be >= 1.")
 
         prior = DynSCMPriorDataLoader(
             cfg=dynscm_cfg,
@@ -1024,6 +1223,8 @@ def main():
             seed=dynscm_seed,
             workers=args.dynscm_workers,
             worker_blas_threads=args.dynscm_worker_blas_threads,
+            sample_filter=dynscm_sample_filter,
+            max_sample_attempts_per_item=dynscm_max_sample_attempts_per_item,
         )
     else:  # tabicl
         prior = TabICLPriorDataLoader(
@@ -1070,6 +1271,10 @@ def main():
             "dynscm_seed": args.dynscm_seed,
             "dynscm_workers": int(args.dynscm_workers),
             "dynscm_worker_blas_threads": int(args.dynscm_worker_blas_threads),
+            "dynscm_sample_filter": dynscm_sample_filter_payload,
+            "dynscm_max_sample_attempts_per_item": int(
+                dynscm_max_sample_attempts_per_item
+            ),
             "dynscm_profile": args.dynscm_profile,
             "dynscm_profile_overrides": profile_dynscm_overrides,
             "dynscm_overrides": (

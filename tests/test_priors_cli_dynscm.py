@@ -262,6 +262,22 @@ def test_dynscm_cli_benchmark_aligned_profile_matches_benchmark_contract(
     assert metadata["dynscm_config"]["num_kernels"] == 3
     assert metadata["dynscm_config"]["max_feature_lag"] == 32
     assert metadata["dynscm_config"]["add_mask_channels"] is True
+    assert metadata["dynscm_config"]["enforce_target_lagged_parent"] is True
+    assert metadata["dynscm_config"]["force_target_self_lag_if_parentless"] is True
+    assert metadata["dynscm_config"]["target_self_lag_min_budget_fraction"] == 0.4
+    assert metadata["dynscm_config"]["disable_mask_channels_when_missing_off"] is True
+    assert metadata["dynscm_config"]["learnability_probe"] is True
+    assert metadata["dynscm_config"]["informative_feature_std_floor"] == 1e-3
+    assert metadata["dynscm_config"]["min_informative_feature_count"] == 10
+    assert metadata["dynscm_sample_filter"] == {
+        "reject_clipped": True,
+        "max_abs_value_cap": 1000.0,
+        "min_train_target_std": 1e-3,
+        "min_probe_r2": 0.02,
+        "min_informative_feature_count": 10,
+        "informative_feature_std_floor": 1e-3,
+    }
+    assert metadata["dynscm_max_sample_attempts_per_item"] == 16
 
 
 def test_dynscm_cli_benchmark_contract_observed_profiles_match_contract(
@@ -324,16 +340,32 @@ def test_dynscm_cli_benchmark_contract_observed_profiles_match_contract(
         assert cfg["train_rows_max"] == 32
         assert cfg["test_rows_min"] == 16
         assert cfg["test_rows_max"] == 16
-        assert cfg["forecast_horizons"] == [1, 3, 6, 12]
+        assert cfg["forecast_horizons"] == [1, 3]
         assert cfg["explicit_lags"] == [0, 1, 2, 5, 10]
         assert cfg["num_kernels"] == 3
-        assert cfg["add_mask_channels"] is True
+        assert cfg["add_mask_channels"] is False
         assert cfg["missing_mode"] == "off"
         assert cfg["mechanism_type"] == "linear_var"
         assert cfg["noise_family"] == "normal"
         assert cfg["kernel_family"] == "exp_decay"
         assert cfg["series_length_max"] == expected_max_series
         assert cfg["num_regimes"] == expected_regimes
+        assert cfg["enforce_target_lagged_parent"] is True
+        assert cfg["force_target_self_lag_if_parentless"] is True
+        assert cfg["target_self_lag_min_budget_fraction"] == 0.4
+        assert cfg["disable_mask_channels_when_missing_off"] is True
+        assert cfg["learnability_probe"] is True
+        assert cfg["informative_feature_std_floor"] == 1e-3
+        assert cfg["min_informative_feature_count"] == 8
+        assert metadata["dynscm_sample_filter"] == {
+            "reject_clipped": True,
+            "max_abs_value_cap": 1000.0,
+            "min_train_target_std": 1e-3,
+            "min_probe_r2": 0.02,
+            "min_informative_feature_count": 8,
+            "informative_feature_std_floor": 1e-3,
+        }
+        assert metadata["dynscm_max_sample_attempts_per_item"] == 16
 
 
 def test_dynscm_cli_benchmark_aligned_easy_profile_is_deliberately_low_diversity(
@@ -403,6 +435,7 @@ def test_dynscm_cli_benchmark_aligned_easy_profile_is_deliberately_low_diversity
     assert metadata["dynscm_config"]["noise_family"] == "normal"
     assert metadata["dynscm_config"]["missing_mode"] == "off"
     assert metadata["dynscm_config"]["kernel_family"] == "exp_decay"
+    assert metadata["dynscm_config"]["add_mask_channels"] is False
 
 
 def test_dynscm_cli_benchmark_aligned_easy_plus_profile_adds_only_small_diversity(
@@ -469,6 +502,7 @@ def test_dynscm_cli_benchmark_aligned_easy_plus_profile_adds_only_small_diversit
     assert metadata["dynscm_config"]["noise_family"] == "normal"
     assert metadata["dynscm_config"]["missing_mode"] == "off"
     assert metadata["dynscm_config"]["kernel_family_probs"] == [0.8, 0.2]
+    assert metadata["dynscm_config"]["add_mask_channels"] is False
 
 
 def test_dynscm_cli_benchmark_aligned_mechanism_profile_only_increases_mechanism_mix(
@@ -527,6 +561,7 @@ def test_dynscm_cli_benchmark_aligned_mechanism_profile_only_increases_mechanism
     assert metadata["dynscm_config"]["max_lagged_parents"] == 2
     assert metadata["dynscm_config"]["mechanism_type_probs"] == [0.7, 0.3]
     assert metadata["dynscm_config"]["kernel_family_probs"] == [0.8, 0.2]
+    assert metadata["dynscm_config"]["add_mask_channels"] is False
 
 
 def test_dynscm_cli_benchmark_aligned_edges_soft_profile_adds_only_small_edge_drift(
@@ -587,6 +622,7 @@ def test_dynscm_cli_benchmark_aligned_edges_soft_profile_adds_only_small_edge_dr
     assert metadata["dynscm_config"]["kernel_family_probs"] == [0.8, 0.2]
     assert metadata["dynscm_config"]["lagged_edge_add_prob"] == 0.005
     assert metadata["dynscm_config"]["lagged_edge_del_prob"] == 0.005
+    assert metadata["dynscm_config"]["add_mask_channels"] is False
 
 
 def test_dynscm_cli_benchmark_aligned_medium_graph_profile_isolates_structure_changes(
@@ -645,6 +681,7 @@ def test_dynscm_cli_benchmark_aligned_medium_graph_profile_isolates_structure_ch
     assert metadata["dynscm_config"]["max_lagged_parents"] == 2
     assert metadata["dynscm_config"]["mechanism_type_probs"] == [0.7, 0.3]
     assert metadata["dynscm_config"]["kernel_family_probs"] == [0.7, 0.3]
+    assert metadata["dynscm_config"]["add_mask_channels"] is False
 
 
 def test_dynscm_cli_benchmark_aligned_medium_noise_profile_adds_noise_diversity_only(
@@ -703,6 +740,7 @@ def test_dynscm_cli_benchmark_aligned_medium_noise_profile_adds_noise_diversity_
     assert metadata["dynscm_config"]["student_df_min"] == 4.0
     assert metadata["dynscm_config"]["student_df_max"] == 8.0
     assert metadata["dynscm_config"]["mechanism_type_probs"] == [0.7, 0.3]
+    assert metadata["dynscm_config"]["add_mask_channels"] is False
 
 
 def test_dynscm_cli_benchmark_aligned_medium_missing_profile_adds_missingness_last(
@@ -759,6 +797,8 @@ def test_dynscm_cli_benchmark_aligned_medium_missing_profile_adds_missingness_la
     assert metadata["dynscm_config"]["noise_family_probs"] == [0.8, 0.2]
     assert metadata["dynscm_config"]["missing_mode_probs"] == [0.8, 0.2]
     assert metadata["dynscm_config"]["mechanism_type_probs"] == [0.7, 0.3]
+    assert metadata["dynscm_config"]["add_mask_channels"] is True
+    assert metadata["dynscm_config"]["disable_mask_channels_when_missing_off"] is True
 
 
 def test_dynscm_cli_benchmark_aligned_medium_profile_is_moderately_diverse(
@@ -828,6 +868,7 @@ def test_dynscm_cli_benchmark_aligned_medium_profile_is_moderately_diverse(
     assert metadata["dynscm_config"]["noise_family_probs"] == [0.8, 0.2]
     assert metadata["dynscm_config"]["missing_mode_probs"] == [0.8, 0.2]
     assert metadata["dynscm_config"]["kernel_family_probs"] == [0.7, 0.3]
+    assert metadata["dynscm_config"]["disable_mask_channels_when_missing_off"] is True
 
 
 def test_dynscm_cli_benchmark_aligned_full_profile_is_explicit_alias_of_rich_aligned(
@@ -896,3 +937,4 @@ def test_dynscm_cli_benchmark_aligned_full_profile_is_explicit_alias_of_rich_ali
     assert metadata["dynscm_config"]["share_base_graph"] is False
     assert metadata["dynscm_config"]["mechanism_type_probs"] == [0.35, 0.65]
     assert metadata["dynscm_config"]["noise_family_probs"] == [0.4, 0.6]
+    assert metadata["dynscm_config"]["disable_mask_channels_when_missing_off"] is True
