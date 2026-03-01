@@ -104,6 +104,7 @@ def _ridge_design_matrices(
     y: np.ndarray,
     *,
     n_train: int,
+    std_floor: float = 1e-8,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     x_matrix = _as_row_matrix(x)
     y_vector = _as_vector(y)
@@ -121,7 +122,7 @@ def _ridge_design_matrices(
         ddof=1 if x_train.shape[0] > 1 else 0,
         keepdims=True,
     )
-    safe_std_arr = np.where(std >= 1e-8, std, 1.0)
+    safe_std_arr = np.where(std >= float(std_floor), std, 1.0)
     x_train_std = (x_train - mean) / safe_std_arr
     return x_train_std, y_train, mean, safe_std_arr
 
@@ -168,7 +169,12 @@ def ridge_probe_r2_train(
     n_train: int,
     alpha: float = 1e-3,
 ) -> float:
-    x_train_std, y_train, _, _ = _ridge_design_matrices(x, y, n_train=n_train)
+    x_train_std, y_train, _, _ = _ridge_design_matrices(
+        x,
+        y,
+        n_train=n_train,
+        std_floor=1e-8,
+    )
     predictions = _ridge_predict(
         x_train_std,
         y_train,
@@ -193,6 +199,7 @@ def ridge_probe_r2_holdout(
         x_matrix,
         y_vector,
         n_train=n_train,
+        std_floor=1e-8,
     )
     x_test = x_matrix[n_train:]
     y_test = y_vector[n_train:]
@@ -214,6 +221,8 @@ def ridge_holdout_predictions(
     *,
     n_train: int,
     alpha: float = 1e-3,
+    std_floor: float = 1e-8,
+    z_clip: float | None = None,
 ) -> np.ndarray:
     x_matrix = _as_row_matrix(x)
     y_vector = _as_vector(y)
@@ -225,11 +234,16 @@ def ridge_holdout_predictions(
         x_matrix,
         y_vector,
         n_train=n_train,
+        std_floor=std_floor,
     )
     x_test = x_matrix[n_train:]
     if x_test.shape[0] == 0:
         return np.zeros((0,), dtype=np.float64)
     x_test_std = (x_test - mean) / safe_std_arr
+    if z_clip is not None and z_clip > 0.0:
+        clip_value = float(z_clip)
+        x_train_std = np.clip(x_train_std, -clip_value, clip_value)
+        x_test_std = np.clip(x_test_std, -clip_value, clip_value)
     return _ridge_predict(
         x_train_std,
         y_train,

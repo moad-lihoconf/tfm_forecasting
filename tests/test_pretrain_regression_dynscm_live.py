@@ -503,3 +503,97 @@ def test_pretrain_regression_dynscm_live_no_warm_start_skips_profile_checkpoint(
     )
 
     assert captured["ckpt"] is None
+
+
+def test_pretrain_regression_dynscm_live_cli_debug_output_clamp_overrides_checkpoint(
+    monkeypatch, tmp_path: Path
+) -> None:
+    checkpoint_path = tmp_path / "clamp_checkpoint.pth"
+    weights_path = tmp_path / "weights.pth"
+    buckets_path = tmp_path / "buckets.pth"
+    torch.save(
+        {
+            "epoch": 1,
+            "architecture": {
+                "num_layers": 6,
+                "embedding_size": 192,
+                "num_attention_heads": 6,
+                "mlp_hidden_size": 768,
+                "num_outputs": 1,
+                "dropout": 0.0,
+                "feature_normalization": "per_function_zscore",
+                "debug_output_clamp": 0.2,
+            },
+            "model": {},
+            "optimizer": {"state": {}, "param_groups": []},
+            "optimizer_name": "adamw",
+            "regression_loss": "mse",
+            "target_normalization": "none",
+        },
+        checkpoint_path,
+    )
+
+    monkeypatch.setattr(live_train, "get_default_device", lambda: torch.device("cpu"))
+    monkeypatch.setattr(
+        live_train.NanoTabPFNModel,
+        "load_state_dict",
+        lambda self, state_dict, strict=True: None,
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_train(**kwargs):
+        captured.update(kwargs)
+        run_dir = Path("workdir/live-clamp-override")
+        run_dir.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "architecture": {
+                    "num_layers": 6,
+                    "embedding_size": 192,
+                    "num_attention_heads": 6,
+                    "mlp_hidden_size": 768,
+                    "num_outputs": 1,
+                    "dropout": 0.0,
+                    "feature_normalization": "per_function_zscore",
+                    "debug_output_clamp": getattr(
+                        kwargs["model"], "debug_output_clamp", None
+                    ),
+                },
+                "model": kwargs["model"].state_dict(),
+            },
+            run_dir / "best_checkpoint.pth",
+        )
+        torch.save(
+            {"model": kwargs["model"].state_dict()}, run_dir / "latest_checkpoint.pth"
+        )
+        return kwargs["model"], {
+            "best_epoch": 1,
+            "best_metric": 0.1,
+            "stop_reason": "completed",
+        }
+
+    monkeypatch.setattr(live_train, "train", _fake_train)
+
+    live_train.main(
+        [
+            "--research_profile",
+            "medium32k_live_baseline",
+            "--saveweights",
+            str(weights_path),
+            "--savebuckets",
+            str(buckets_path),
+            "--loadcheckpoint",
+            str(checkpoint_path),
+            "--warm_start",
+            "--debug_output_clamp",
+            "-1",
+            "--dynscm_workers",
+            "1",
+            "--runname",
+            "live-clamp-override",
+        ]
+    )
+
+    model = cast(live_train.NanoTabPFNModel, captured["model"])
+    assert model.debug_output_clamp is None

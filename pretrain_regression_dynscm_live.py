@@ -348,6 +348,7 @@ def _run_config_payload(
     warm_start: bool,
     resolved_target_normalization: str,
     resolved_target_std_floor: float,
+    resolved_debug_output_clamp: float | None,
 ) -> dict[str, object]:
     return {
         "research_profile": profile.name,
@@ -367,6 +368,7 @@ def _run_config_payload(
             "min_train_target_std": float(args.min_train_target_std),
             "feature_normalization": args.feature_normalization,
             "debug_output_clamp": args.debug_output_clamp,
+            "resolved_debug_output_clamp": resolved_debug_output_clamp,
             "dynscm_workers": int(args.dynscm_workers),
             "dynscm_worker_blas_threads": int(args.dynscm_worker_blas_threads),
             "warm_start": bool(warm_start),
@@ -586,6 +588,25 @@ def main(argv: list[str] | None = None) -> None:
                     "Checkpoint feature_normalization does not match requested "
                     "--feature_normalization."
                 )
+        cli_debug_output_clamp: float | None
+        if args.debug_output_clamp is not None and args.debug_output_clamp < 0.0:
+            cli_debug_output_clamp = None
+        else:
+            cli_debug_output_clamp = args.debug_output_clamp
+        checkpoint_debug_output_clamp: float | None = None
+        if ckpt is not None:
+            raw_checkpoint_clamp = ckpt.get("architecture", {}).get(
+                "debug_output_clamp",
+                None,
+            )
+            checkpoint_debug_output_clamp = (
+                None if raw_checkpoint_clamp is None else float(raw_checkpoint_clamp)
+            )
+        resolved_debug_output_clamp = (
+            cli_debug_output_clamp
+            if args.debug_output_clamp is not None
+            else checkpoint_debug_output_clamp
+        )
 
         amp_dtype = _resolve_amp_dtype(resolved_budget["amp_dtype"])
         use_amp = bool(resolved_budget["amp"] and device.type == "cuda")
@@ -645,15 +666,7 @@ def main(argv: list[str] | None = None) -> None:
                 if ckpt
                 else _feature_normalization(args.feature_normalization)
             ),
-            debug_output_clamp=(
-                (
-                    None
-                    if ckpt["architecture"].get("debug_output_clamp") is None
-                    else float(ckpt["architecture"]["debug_output_clamp"])
-                )
-                if ckpt
-                else args.debug_output_clamp
-            ),
+            debug_output_clamp=resolved_debug_output_clamp,
         )
         if ckpt:
             checkpoint_optimizer = ckpt.get("optimizer_name", args.optimizer)
@@ -760,6 +773,7 @@ def main(argv: list[str] | None = None) -> None:
                         warm_start=effective_warm_start,
                         resolved_target_normalization=resolved_target_normalization,
                         resolved_target_std_floor=resolved_target_std_floor,
+                        resolved_debug_output_clamp=resolved_debug_output_clamp,
                     ),
                     indent=2,
                     sort_keys=True,
@@ -795,7 +809,7 @@ def main(argv: list[str] | None = None) -> None:
                 "debug_output_clamp": getattr(
                     trained_model,
                     "debug_output_clamp",
-                    args.debug_output_clamp,
+                    resolved_debug_output_clamp,
                 ),
             },
             "model": trained_model.state_dict(),
@@ -810,6 +824,7 @@ def main(argv: list[str] | None = None) -> None:
                 warm_start=effective_warm_start,
                 resolved_target_normalization=resolved_target_normalization,
                 resolved_target_std_floor=resolved_target_std_floor,
+                resolved_debug_output_clamp=resolved_debug_output_clamp,
             ),
         }
 

@@ -22,6 +22,7 @@ from tfmplayground.priors.dynscm.research_profiles import (
 from tfmplayground.utils import get_default_device
 
 FeatureNormalization = Literal["per_function_zscore", "none"]
+TargetNormalization = Literal["per_function_zscore", "per_function_clamped", "none"]
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -43,11 +44,57 @@ def _feature_normalization(value: object) -> FeatureNormalization:
     return cast(FeatureNormalization, value)
 
 
+def _target_normalization(value: object) -> TargetNormalization:
+    if value not in {"per_function_zscore", "per_function_clamped", "none"}:
+        raise ValueError(f"Unsupported target normalization: {value!r}.")
+    return cast(TargetNormalization, value)
+
+
+def _resolve_eval_target_settings(
+    checkpoint: dict[str, object],
+) -> tuple[TargetNormalization, float, str]:
+    training = checkpoint.get("training", {})
+    if not isinstance(training, dict):
+        training = {}
+    live_profile = checkpoint.get("live_profile", {})
+    if not isinstance(live_profile, dict):
+        live_profile = {}
+    cli_cfg = live_profile.get("cli", {})
+    if not isinstance(cli_cfg, dict):
+        cli_cfg = {}
+
+    if "target_normalization" in training or "target_std_floor" in training:
+        settings_source = "training"
+        raw_target_normalization = training.get(
+            "target_normalization",
+            cli_cfg.get("target_normalization", "none"),
+        )
+        raw_target_std_floor = training.get(
+            "target_std_floor",
+            cli_cfg.get("target_std_floor", 1e-2),
+        )
+    elif "target_normalization" in cli_cfg or "target_std_floor" in cli_cfg:
+        settings_source = "live_profile.cli"
+        raw_target_normalization = cli_cfg.get("target_normalization", "none")
+        raw_target_std_floor = cli_cfg.get("target_std_floor", 1e-2)
+    else:
+        settings_source = "built_in_default"
+        raw_target_normalization = "none"
+        raw_target_std_floor = 1e-2
+    target_normalization = _target_normalization(raw_target_normalization)
+    target_std_floor = float(raw_target_std_floor)
+    if target_std_floor <= 0.0:
+        raise ValueError("Checkpoint target_std_floor must be > 0.")
+    return target_normalization, target_std_floor, settings_source
+
+
 def _suite_metrics(
     *,
     model: NanoTabPFNModel,
     loader,
     device: torch.device,
+    target_normalization: TargetNormalization,
+    target_std_floor: float,
 ) -> dict[str, float | int | dict[str, dict[str, float | int]]]:
     model.eval()
     total_batches = 0
@@ -124,10 +171,26 @@ def _suite_metrics(
             target_mask_batch = target_mask_batch[:, :max_num_datapoints]
             mask = target_mask_batch[:, eval_pos:]
         targets = target_y_batch[:, eval_pos:]
-        outputs = model((x_batch, y_batch[:, :eval_pos]), single_eval_pos=eval_pos)
+        context = y_batch[:, :eval_pos].to(torch.float32)
+        y_mean = context.mean(dim=1, keepdim=True)
+        y_std = context.std(dim=1, keepdim=True)
+        if target_normalization == "per_function_zscore":
+            y_scale = y_std + 1e-8
+            model_context = (context - y_mean) / y_scale
+        elif target_normalization == "per_function_clamped":
+            y_scale = torch.clamp(y_std, min=target_std_floor)
+            model_context = (context - y_mean) / y_scale
+        else:
+            y_scale = torch.ones_like(y_std)
+            model_context = context
+
+        outputs = model((x_batch, model_context), single_eval_pos=eval_pos)
         if outputs.ndim == targets.ndim + 1 and outputs.shape[-1] == 1:
             outputs = outputs.squeeze(-1)
-        context = y_batch[:, :eval_pos].to(torch.float32)
+        if target_normalization != "none":
+            outputs = (outputs.to(torch.float32) * y_scale) + y_mean
+        else:
+            outputs = outputs.to(torch.float32)
         if context.shape[1] > 0:
             context_mean = context.mean(dim=1, keepdim=True).expand_as(targets)
         else:
@@ -150,6 +213,9 @@ def _suite_metrics(
                 x_cpu[row_idx, :row_total].numpy(),
                 y_cpu[row_idx, :row_total].numpy(),
                 n_train=eval_pos,
+                alpha=1e-3,
+                std_floor=1e-3,
+                z_clip=5.0,
             )
             if preds_np.size == 0:
                 continue
@@ -275,6 +341,15 @@ def main(argv: list[str] | None = None) -> None:
             local_temp_dirs,
         )
         checkpoint = torch.load(path_for_read(args.checkpoint_path), map_location="cpu")
+        resolved_target_normalization, resolved_target_std_floor, settings_source = (
+            _resolve_eval_target_settings(checkpoint)
+        )
+        print(
+            "[synthetic-eval] target_normalization="
+            f"{resolved_target_normalization} target_std_floor="
+            f"{resolved_target_std_floor:.6f} source={settings_source}",
+            flush=True,
+        )
         architecture = checkpoint["architecture"]
         model = NanoTabPFNModel(
             num_attention_heads=int(architecture["num_attention_heads"]),
@@ -326,7 +401,13 @@ def main(argv: list[str] | None = None) -> None:
             )
             try:
                 suite_metrics = {
-                    **_suite_metrics(model=model, loader=loader, device=device),
+                    **_suite_metrics(
+                        model=model,
+                        loader=loader,
+                        device=device,
+                        target_normalization=resolved_target_normalization,
+                        target_std_floor=resolved_target_std_floor,
+                    ),
                     "seed": int(suite.seed),
                     "steps": int(suite_steps),
                 }
