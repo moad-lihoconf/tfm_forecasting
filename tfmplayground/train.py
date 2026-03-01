@@ -554,6 +554,7 @@ def train(
     ] = "per_function_zscore",
     target_std_floor: float = 1e-2,
     min_train_target_std: float = 0.0,
+    grad_clip_norm: float = 1.0,
     debug_trace_path: str | None = None,
     debug_trace_first_n_batches: int = 0,
     debug_trace_every_n_batches: int = 0,
@@ -620,6 +621,8 @@ def train(
         raise ValueError("min_train_target_std must be >= 0.")
     if target_std_floor <= 0.0:
         raise ValueError("target_std_floor must be > 0.")
+    if grad_clip_norm <= 0.0:
+        raise ValueError("grad_clip_norm must be > 0.")
     if debug_trace_first_n_batches < 0:
         raise ValueError("debug_trace_first_n_batches must be >= 0.")
     if debug_trace_every_n_batches < 0:
@@ -772,7 +775,10 @@ def train(
                 if (i + 1) % accumulate_gradients == 0:
                     if scaler.is_enabled():
                         scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(wrapped_model.parameters(), 1.0)
+                    torch.nn.utils.clip_grad_norm_(
+                        wrapped_model.parameters(),
+                        grad_clip_norm,
+                    )
                     if trace_this_batch:
                         grad_norm_after_clip = _parameter_grad_norm(
                             wrapped_model.parameters()
@@ -968,6 +974,7 @@ def train(
                 "target_normalization": target_normalization,
                 "target_std_floor": float(target_std_floor),
                 "min_train_target_std": float(min_train_target_std),
+                "grad_clip_norm": float(grad_clip_norm),
                 "epochs": int(epochs),
                 "steps_per_epoch": int(len(prior)),
             },
@@ -991,5 +998,6 @@ def train(
         "target_normalization": target_normalization,
         "target_std_floor": float(target_std_floor),
         "min_train_target_std": float(min_train_target_std),
+        "grad_clip_norm": float(grad_clip_norm),
         "debug_trace_path": debug_trace_path,
     }

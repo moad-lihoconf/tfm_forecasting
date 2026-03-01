@@ -24,6 +24,7 @@ Options:
   --dynscm-workers N        Live DynSCM generation workers (default: 8)
   --dynscm-worker-blas-threads N
                            BLAS threads per DynSCM worker (default: 1)
+  --grad-clip-norm X        Gradient clipping threshold passed to training (default: 1.0)
   --local-eval-steps N      Synthetic eval steps per suite override (default: 16)
   --local-audit-steps N     Learnability audit sample steps (default: 16)
   --local-compare-steps N   Benchmark compare sample steps (default: 16)
@@ -123,6 +124,7 @@ submit_profile() {
     -- \
     --loadcheckpoint="$COMMON_WARM_START" \
     --warm_start \
+    --grad_clip_norm="$GRAD_CLIP_NORM" \
     --dynscm_workers="$DYNSCM_WORKERS" \
     --dynscm_worker_blas_threads="$DYNSCM_WORKER_BLAS_THREADS"
 }
@@ -164,6 +166,7 @@ ACCELERATOR_TYPE="${VERTEX_ACCELERATOR_TYPE:-NVIDIA_L4}"
 ACCELERATOR_COUNT="${VERTEX_ACCELERATOR_COUNT:-1}"
 DYNSCM_WORKERS="${VERTEX_DYNSCM_WORKERS:-8}"
 DYNSCM_WORKER_BLAS_THREADS="${VERTEX_DYNSCM_WORKER_BLAS_THREADS:-1}"
+GRAD_CLIP_NORM="${VERTEX_GRAD_CLIP_NORM:-1.0}"
 LOCAL_EVAL_STEPS="${VERTEX_LOCAL_EVAL_STEPS:-16}"
 LOCAL_AUDIT_STEPS="${VERTEX_LOCAL_AUDIT_STEPS:-16}"
 LOCAL_COMPARE_STEPS="${VERTEX_LOCAL_COMPARE_STEPS:-16}"
@@ -256,6 +259,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --dynscm-worker-blas-threads=*)
       DYNSCM_WORKER_BLAS_THREADS="$(require_value --dynscm-worker-blas-threads "${1#*=}")"
+      shift
+      ;;
+    --grad-clip-norm)
+      GRAD_CLIP_NORM="$(require_value "$1" "${2-}")"
+      shift 2
+      ;;
+    --grad-clip-norm=*)
+      GRAD_CLIP_NORM="$(require_value --grad-clip-norm "${1#*=}")"
       shift
       ;;
     --local-eval-steps)
@@ -352,6 +363,10 @@ if (( DYNSCM_WORKERS < 1 )); then
 fi
 if (( DYNSCM_WORKER_BLAS_THREADS < 1 )); then
   echo "Error: --dynscm-worker-blas-threads must be >= 1." >&2
+  exit 2
+fi
+if ! python -c 'import sys; raise SystemExit(0 if float(sys.argv[1]) > 0.0 else 1)' "$GRAD_CLIP_NORM"; then
+  echo "Error: --grad-clip-norm must be > 0." >&2
   exit 2
 fi
 if (( LOCAL_EVAL_STEPS < 1 )); then
@@ -464,6 +479,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "[dry-run] warm_start_checkpoint=${COMMON_WARM_START}"
     echo "[dry-run] dynscm_workers=${DYNSCM_WORKERS}"
     echo "[dry-run] dynscm_worker_blas_threads=${DYNSCM_WORKER_BLAS_THREADS}"
+    echo "[dry-run] grad_clip_norm=${GRAD_CLIP_NORM}"
     echo "[dry-run] local_eval_steps=${LOCAL_EVAL_STEPS}"
     echo "[dry-run] local_audit_steps=${LOCAL_AUDIT_STEPS}"
     echo "[dry-run] local_compare_steps=${LOCAL_COMPARE_STEPS}"

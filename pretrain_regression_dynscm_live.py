@@ -54,6 +54,7 @@ class ResolvedBudget(TypedDict):
     early_stopping_patience: int
     early_stopping_min_delta: float
     loss_weighting: Literal["per_target", "per_function"]
+    grad_clip_norm: float
     debug_trace_first_n_batches: int
     debug_trace_every_n_batches: int
 
@@ -141,6 +142,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         choices=["per_target", "per_function"],
     )
+    parser.add_argument("--grad_clip_norm", type=float, default=None)
     parser.add_argument(
         "--target_normalization",
         type=str,
@@ -369,6 +371,7 @@ def _run_config_payload(
             "feature_normalization": args.feature_normalization,
             "debug_output_clamp": args.debug_output_clamp,
             "resolved_debug_output_clamp": resolved_debug_output_clamp,
+            "grad_clip_norm": float(resolved_budget["grad_clip_norm"]),
             "dynscm_workers": int(args.dynscm_workers),
             "dynscm_worker_blas_threads": int(args.dynscm_worker_blas_threads),
             "warm_start": bool(warm_start),
@@ -476,6 +479,9 @@ def main(argv: list[str] | None = None) -> None:
             Literal["per_target", "per_function"],
             _as_str(_budget_value(args.loss_weighting, budget.loss_weighting)),
         ),
+        "grad_clip_norm": _as_float(
+            _budget_value(args.grad_clip_norm, budget.grad_clip_norm)
+        ),
         "debug_trace_first_n_batches": _as_int(
             _budget_value(
                 args.debug_trace_first_n_batches,
@@ -513,6 +519,8 @@ def main(argv: list[str] | None = None) -> None:
         raise ValueError("--target_std_floor must be > 0.")
     if args.min_train_target_std < 0.0:
         raise ValueError("--min_train_target_std must be >= 0.")
+    if resolved_budget["grad_clip_norm"] <= 0.0:
+        raise ValueError("--grad_clip_norm must be > 0.")
     if args.checkpoint_gcs_dir is not None and not is_gcs_uri(args.checkpoint_gcs_dir):
         raise ValueError("--checkpoint_gcs_dir must be a gs:// path.")
 
@@ -734,6 +742,7 @@ def main(argv: list[str] | None = None) -> None:
             target_normalization=resolved_target_normalization,
             target_std_floor=resolved_target_std_floor,
             min_train_target_std=args.min_train_target_std,
+            grad_clip_norm=resolved_budget["grad_clip_norm"],
             debug_trace_path=local_debug_trace_path,
             debug_trace_first_n_batches=resolved_budget["debug_trace_first_n_batches"],
             debug_trace_every_n_batches=resolved_budget["debug_trace_every_n_batches"],

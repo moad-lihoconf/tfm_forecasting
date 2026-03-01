@@ -144,6 +144,8 @@ def test_pretrain_regression_dynscm_live_writes_artifacts(
             "2",
             "--batchsize",
             "2",
+            "--grad_clip_norm",
+            "5.0",
             "--dynscm_workers",
             "1",
             "--runname",
@@ -159,6 +161,7 @@ def test_pretrain_regression_dynscm_live_writes_artifacts(
     assert run_config_path.exists()
     assert cast(live_train.PriorDataLoader, captured["prior"]).num_steps == 2
     assert cast(live_train.PriorDataLoader, captured["val_prior"]).num_steps == 64
+    assert captured["grad_clip_norm"] == 5.0
     assert captured["ckpt"] is None
 
 

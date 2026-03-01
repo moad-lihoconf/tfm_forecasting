@@ -88,6 +88,7 @@ class ResearchTrainingBudget:
     early_stopping_patience: int = 5
     early_stopping_min_delta: float = 1e-5
     loss_weighting: Literal["per_target", "per_function"] = "per_target"
+    grad_clip_norm: float = 1.0
     debug_trace_first_n_batches: int = 200
     debug_trace_every_n_batches: int = 200
 
@@ -655,6 +656,11 @@ def _mode_ladder_modes() -> tuple[DynSCMBatchMode, ...]:
         DynSCMBatchMode(
             name="temporal_only",
             cfg_overrides={
+                "num_regimes": 1,
+                "sticky_rho": 1.0,
+                "shared_order": True,
+                "share_base_graph": True,
+                "drift_std": 0.0,
                 "lagged_edge_add_prob": 0.0,
                 "lagged_edge_del_prob": 0.0,
                 "mechanism_type": "linear_var",

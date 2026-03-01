@@ -294,6 +294,12 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--grad_clip_norm",
+        type=float,
+        default=1.0,
+        help="global gradient norm clipping threshold (> 0)",
+    )
+    parser.add_argument(
         "--runname",
         type=str,
         default="nanoTFM",
@@ -457,6 +463,8 @@ def main(argv: list[str] | None = None) -> None:
             raise ValueError("--target_std_floor must be > 0.")
         if args.min_train_target_std < 0.0:
             raise ValueError("--min_train_target_std must be >= 0.")
+        if args.grad_clip_norm <= 0.0:
+            raise ValueError("--grad_clip_norm must be > 0.")
         if args.debug_output_clamp is not None and args.debug_output_clamp <= 0.0:
             raise ValueError("--debug_output_clamp must be > 0 when provided.")
         if args.debug_trace_first_n_batches < 0:
@@ -760,6 +768,7 @@ def main(argv: list[str] | None = None) -> None:
             target_normalization=args.target_normalization,
             target_std_floor=args.target_std_floor,
             min_train_target_std=args.min_train_target_std,
+            grad_clip_norm=args.grad_clip_norm,
             debug_trace_path=local_debug_trace_path,
             debug_trace_first_n_batches=args.debug_trace_first_n_batches,
             debug_trace_every_n_batches=args.debug_trace_every_n_batches,
@@ -865,6 +874,10 @@ def main(argv: list[str] | None = None) -> None:
                     "min_train_target_std": train_info.get(
                         "min_train_target_std",
                         args.min_train_target_std,
+                    ),
+                    "grad_clip_norm": train_info.get(
+                        "grad_clip_norm",
+                        args.grad_clip_norm,
                     ),
                     "debug_trace_path": train_info.get(
                         "debug_trace_path",

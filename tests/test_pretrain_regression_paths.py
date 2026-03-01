@@ -80,6 +80,8 @@ def test_pretrain_regression_main_local_paths(monkeypatch, tmp_path: Path) -> No
             "7",
             "--min_train_target_std",
             "0.05",
+            "--grad_clip_norm",
+            "5.0",
             "--feature_normalization",
             "none",
             "--debug_output_clamp",
@@ -103,6 +105,7 @@ def test_pretrain_regression_main_local_paths(monkeypatch, tmp_path: Path) -> No
     assert captured_train_kwargs["target_normalization"] == "none"
     assert captured_train_kwargs["target_std_floor"] == 0.02
     assert captured_train_kwargs["min_train_target_std"] == 0.05
+    assert captured_train_kwargs["grad_clip_norm"] == 5.0
     assert captured_train_kwargs["debug_trace_first_n_batches"] == 3
     assert captured_train_kwargs["debug_trace_every_n_batches"] == 4
     assert captured_train_kwargs["model"].feature_normalization == "none"

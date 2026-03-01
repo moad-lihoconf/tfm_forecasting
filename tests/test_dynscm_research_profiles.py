@@ -197,6 +197,22 @@ def test_mode_ladder_profile_uses_softer_self_lag_floor_than_generic_target(
     assert profile.train_source.cfg.target_self_lag_abs_min == 0.10
 
 
+def test_mode_ladder_temporal_only_mode_disables_hidden_regime_and_drift_shift(
+    priors_modules,
+) -> None:
+    profiles_mod = priors_modules["research_profiles"]
+    profile = profiles_mod.get_research_profile("medium32k_live_mode_ladder")
+    temporal_only = next(
+        mode for mode in profile.train_source.modes if mode.name == "temporal_only"
+    )
+
+    assert temporal_only.cfg_overrides["num_regimes"] == 1
+    assert temporal_only.cfg_overrides["sticky_rho"] == 1.0
+    assert temporal_only.cfg_overrides["shared_order"] is True
+    assert temporal_only.cfg_overrides["share_base_graph"] is True
+    assert temporal_only.cfg_overrides["drift_std"] == 0.0
+
+
 def test_non_baseline_profiles_validate_on_raw_target_cfg(priors_modules) -> None:
     profiles_mod = priors_modules["research_profiles"]
     target_cfg = profiles_mod.target_learnable_cfg()
