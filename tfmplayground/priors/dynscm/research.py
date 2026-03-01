@@ -73,6 +73,8 @@ class DynSCMSampleFilterConfig:
     min_train_target_std: float | None = None
     min_probe_r2: float | None = None
     max_probe_r2: float | None = None
+    min_probe_train_r2: float | None = None
+    max_probe_train_r2: float | None = None
     min_informative_feature_count: int | None = None
     informative_feature_std_floor: float | None = None
     max_missing_fraction: float | None = None
@@ -85,6 +87,8 @@ class DynSCMSampleFilterConfig:
             "min_train_target_std": self.min_train_target_std,
             "min_probe_r2": self.min_probe_r2,
             "max_probe_r2": self.max_probe_r2,
+            "min_probe_train_r2": self.min_probe_train_r2,
+            "max_probe_train_r2": self.max_probe_train_r2,
             "min_informative_feature_count": self.min_informative_feature_count,
             "informative_feature_std_floor": self.informative_feature_std_floor,
             "max_missing_fraction": self.max_missing_fraction,
@@ -102,6 +106,8 @@ class DynSCMSampleFilterConfig:
         min_train_target_std = payload.get("min_train_target_std")
         min_probe_r2 = payload.get("min_probe_r2")
         max_probe_r2 = payload.get("max_probe_r2")
+        min_probe_train_r2 = payload.get("min_probe_train_r2")
+        max_probe_train_r2 = payload.get("max_probe_train_r2")
         min_informative_feature_count = payload.get("min_informative_feature_count")
         informative_feature_std_floor = payload.get("informative_feature_std_floor")
         max_missing_fraction = payload.get("max_missing_fraction")
@@ -123,6 +129,16 @@ class DynSCMSampleFilterConfig:
             ),
             max_probe_r2=(
                 None if max_probe_r2 is None else float(cast(int | float, max_probe_r2))
+            ),
+            min_probe_train_r2=(
+                None
+                if min_probe_train_r2 is None
+                else float(cast(int | float, min_probe_train_r2))
+            ),
+            max_probe_train_r2=(
+                None
+                if max_probe_train_r2 is None
+                else float(cast(int | float, max_probe_train_r2))
             ),
             min_informative_feature_count=(
                 None
@@ -166,18 +182,30 @@ class DynSCMSampleFilterConfig:
             and float(target_std) < self.min_train_target_std
         ):
             return "low_std"
-        probe_r2 = metadata.get("sampled_probe_r2")
-        if self.min_probe_r2 is not None and (
-            not isinstance(probe_r2, int | float)
-            or not np.isfinite(float(probe_r2))
-            or float(probe_r2) < self.min_probe_r2
+        probe_r2_train = metadata.get("sampled_probe_r2_train")
+        if not isinstance(probe_r2_train, int | float):
+            probe_r2_train = metadata.get("sampled_probe_r2")
+        min_probe_train_r2 = (
+            self.min_probe_train_r2
+            if self.min_probe_train_r2 is not None
+            else self.min_probe_r2
+        )
+        max_probe_train_r2 = (
+            self.max_probe_train_r2
+            if self.max_probe_train_r2 is not None
+            else self.max_probe_r2
+        )
+        if min_probe_train_r2 is not None and (
+            not isinstance(probe_r2_train, int | float)
+            or not np.isfinite(float(probe_r2_train))
+            or float(probe_r2_train) < min_probe_train_r2
         ):
             return "probe_r2_low"
         if (
-            self.max_probe_r2 is not None
-            and isinstance(probe_r2, int | float)
-            and np.isfinite(float(probe_r2))
-            and float(probe_r2) > self.max_probe_r2
+            max_probe_train_r2 is not None
+            and isinstance(probe_r2_train, int | float)
+            and np.isfinite(float(probe_r2_train))
+            and float(probe_r2_train) > max_probe_train_r2
         ):
             return "probe_r2_high"
         informative_feature_count = metadata.get("sampled_informative_feature_count")

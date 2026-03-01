@@ -31,6 +31,8 @@ _RICHNESS_METADATA_KEYS = {
     "sampled_train_target_std",
     "sampled_test_target_std",
     "sampled_max_abs_target_value",
+    "sampled_probe_r2_train",
+    "sampled_probe_r2_holdout",
     "sampled_probe_r2",
     "sampled_informative_feature_count",
     "sampled_informative_feature_std_floor",
@@ -387,8 +389,11 @@ def test_parallel_matches_serial_with_batch_shared_overrides(dynscm_api):
             assert value == batch_parallel[key]
 
 
-def test_filter_metadata_and_bounded_resampling_are_deterministic(dynscm_api):
-    config_mod, get_batch_mod = dynscm_api
+def test_filtered_generation_raises_after_bounded_resampling(dynscm_api):
+    config_mod, _ = dynscm_api
+    from tfmplayground.priors.dynscm import parallel as parallel_mod
+    from tfmplayground.priors.dynscm.research import DynSCMSampleFilterConfig
+
     cfg = config_mod.DynSCMConfig.from_dict(
         {
             "num_variables_min": 3,
@@ -400,42 +405,98 @@ def test_filter_metadata_and_bounded_resampling_are_deterministic(dynscm_api):
             "train_rows_max": 8,
             "test_rows_min": 4,
             "test_rows_max": 4,
+            "learnability_probe": True,
         }
     )
+    sample_filter = DynSCMSampleFilterConfig(min_train_target_std=1e9)
+
+    with pytest.raises(
+        RuntimeError, match="rejected after exhausting generation attempts"
+    ):
+        parallel_mod.build_single_dynscm_sample(
+            cfg,
+            sample_seed=77,
+            n_train=8,
+            n_test=4,
+            row_budget=16,
+            num_features=24,
+            sample_filter=sample_filter,
+            max_generation_attempts=2,
+        )
+
+
+def test_probe_metrics_expose_train_and_holdout_scores() -> None:
+    from tfmplayground.priors.dynscm.difficulty import (
+        ridge_probe_r2_holdout,
+        ridge_probe_r2_train,
+    )
+
+    x = np.array([[0.0], [1.0], [2.0], [3.0], [100.0], [101.0]], dtype=np.float64)
+    y = np.array([0.0, 1.0, 2.0, 3.0, -100.0, -101.0], dtype=np.float64)
+
+    assert ridge_probe_r2_train(x, y, n_train=4) > 0.99
+    assert ridge_probe_r2_holdout(x, y, n_train=4) < -0.9
+
+
+def test_filter_uses_train_probe_r2_over_holdout_alias() -> None:
     from tfmplayground.priors.dynscm.research import DynSCMSampleFilterConfig
 
-    sample_filter = DynSCMSampleFilterConfig(min_train_target_std=1e9)
-    get_batch_a = get_batch_mod.make_get_batch_dynscm(
-        cfg,
-        device=torch.device("cpu"),
-        seed=77,
-        sample_filter=sample_filter,
-        max_sample_attempts_per_item=2,
-    )
-    get_batch_b = get_batch_mod.make_get_batch_dynscm(
-        cfg,
-        device=torch.device("cpu"),
-        seed=77,
-        sample_filter=sample_filter,
-        max_sample_attempts_per_item=2,
-    )
-    batch_a = get_batch_a(batch_size=2, num_datapoints_max=16, num_features=24)
-    batch_b = get_batch_b(batch_size=2, num_datapoints_max=16, num_features=24)
+    sample_filter = DynSCMSampleFilterConfig(min_probe_train_r2=0.9)
+    metadata = {
+        "sampled_probe_r2_train": 0.95,
+        "sampled_probe_r2_holdout": -1.0,
+        "sampled_probe_r2": -1.0,
+    }
 
-    assert torch.equal(batch_a["x"], batch_b["x"])
-    assert torch.equal(batch_a["y"], batch_b["y"])
-    assert torch.equal(
-        batch_a["sampled_filter_accept"], batch_b["sampled_filter_accept"]
+    assert sample_filter.rejection_reason(metadata) is None
+
+
+def test_filter_legacy_probe_thresholds_fall_back_to_probe_alias() -> None:
+    from tfmplayground.priors.dynscm.research import DynSCMSampleFilterConfig
+
+    sample_filter = DynSCMSampleFilterConfig(min_probe_r2=0.5)
+    assert sample_filter.rejection_reason({"sampled_probe_r2": 0.25}) == "probe_r2_low"
+
+
+def test_filter_accept_metadata_is_set_only_for_returned_samples(dynscm_api):
+    config_mod, _ = dynscm_api
+    from tfmplayground.priors.dynscm import parallel as parallel_mod
+    from tfmplayground.priors.dynscm.research import DynSCMSampleFilterConfig
+
+    cfg = config_mod.DynSCMConfig.from_dict(
+        {
+            "num_variables_min": 3,
+            "num_variables_max": 3,
+            "series_length_min": 96,
+            "series_length_max": 96,
+            "max_lag": 4,
+            "mechanism_type": "linear_var",
+            "noise_family": "normal",
+            "missing_mode": "off",
+            "train_rows_min": 6,
+            "train_rows_max": 6,
+            "test_rows_min": 3,
+            "test_rows_max": 3,
+            "learnability_probe": True,
+        }
     )
-    assert torch.equal(
-        batch_a["sampled_simulation_num_attempts"],
-        batch_b["sampled_simulation_num_attempts"],
+
+    _, _, metadata = parallel_mod.build_single_dynscm_sample(
+        cfg,
+        sample_seed=101,
+        n_train=6,
+        n_test=3,
+        row_budget=12,
+        num_features=20,
+        sample_filter=DynSCMSampleFilterConfig(
+            min_probe_train_r2=0.0,
+            max_probe_train_r2=1.1,
+        ),
+        max_generation_attempts=4,
     )
-    assert torch.all(batch_a["sampled_filter_accept"] == 0)
-    assert torch.all(batch_a["sampled_generation_attempts_used"] == 2)
-    assert torch.all(batch_a["sampled_low_std_reject_count"] >= 1)
-    _close_if_supported(get_batch_a)
-    _close_if_supported(get_batch_b)
+
+    assert metadata["sampled_filter_accept"] == 1
+    assert metadata["sampled_generation_attempts_used"] >= 1
 
 
 def test_generation_runtime_errors_are_retried(monkeypatch, dynscm_api):

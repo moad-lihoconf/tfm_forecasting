@@ -17,10 +17,15 @@ class DynSCMLearnabilityMetrics:
     max_abs_target_value: float
     informative_feature_count: int
     informative_feature_std_floor: float
-    probe_r2: float | None
+    probe_r2_train: float | None
+    probe_r2_holdout: float | None
     missing_fraction: float
     block_missing_fraction: float
     difficulty_bin: DifficultyBin
+
+    @property
+    def probe_r2(self) -> float | None:
+        return self.probe_r2_holdout
 
 
 def _as_row_matrix(x: np.ndarray) -> np.ndarray:
@@ -94,7 +99,86 @@ def max_block_missing_fraction(observed_mask: np.ndarray) -> float:
     return float(longest) / float(num_steps)
 
 
-def ridge_probe_r2(
+def _ridge_design_matrices(
+    x: np.ndarray,
+    y: np.ndarray,
+    *,
+    n_train: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    x_matrix = _as_row_matrix(x)
+    y_vector = _as_vector(y)
+    if x_matrix.shape[0] != y_vector.shape[0]:
+        raise ValueError("x and y must agree on row dimension.")
+    if n_train <= 1 or n_train > x_matrix.shape[0]:
+        raise ValueError("n_train must satisfy 1 < n_train <= num_rows.")
+
+    x_train = x_matrix[:n_train]
+    y_train = y_vector[:n_train]
+    mean = np.mean(x_train, axis=0, keepdims=True)
+    std = np.std(
+        x_train,
+        axis=0,
+        ddof=1 if x_train.shape[0] > 1 else 0,
+        keepdims=True,
+    )
+    safe_std_arr = np.where(std >= 1e-8, std, 1.0)
+    x_train_std = (x_train - mean) / safe_std_arr
+    return x_train_std, y_train, mean, safe_std_arr
+
+
+def _ridge_predict(
+    x_train_std: np.ndarray,
+    y_train: np.ndarray,
+    x_eval_std: np.ndarray,
+    *,
+    alpha: float,
+) -> np.ndarray:
+    if x_eval_std.shape[0] == 0:
+        return np.zeros((0,), dtype=np.float64)
+
+    design_train = np.concatenate(
+        [np.ones((x_train_std.shape[0], 1), dtype=np.float64), x_train_std],
+        axis=1,
+    )
+    design_eval = np.concatenate(
+        [np.ones((x_eval_std.shape[0], 1), dtype=np.float64), x_eval_std],
+        axis=1,
+    )
+    ridge = np.eye(design_train.shape[1], dtype=np.float64)
+    ridge[0, 0] = 0.0
+    gram = design_train.T @ design_train + (float(alpha) * ridge)
+    rhs = design_train.T @ y_train
+    coeffs = np.linalg.solve(gram, rhs)
+    return design_eval @ coeffs
+
+
+def _r2_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    sse = float(np.sum((y_true - y_pred) ** 2))
+    centered = y_true - float(np.mean(y_true))
+    sst = float(np.sum(centered**2))
+    if sst <= 1e-12:
+        return 0.0
+    return float(max(-1.0, min(1.0, 1.0 - (sse / sst))))
+
+
+def ridge_probe_r2_train(
+    x: np.ndarray,
+    y: np.ndarray,
+    *,
+    n_train: int,
+    alpha: float = 1e-3,
+) -> float:
+    x_train_std, y_train, _, _ = _ridge_design_matrices(x, y, n_train=n_train)
+    predictions = _ridge_predict(
+        x_train_std,
+        y_train,
+        x_train_std,
+        alpha=alpha,
+    )
+    return _r2_score(y_train, predictions)
+
+
+def ridge_probe_r2_holdout(
     x: np.ndarray,
     y: np.ndarray,
     *,
@@ -103,45 +187,25 @@ def ridge_probe_r2(
 ) -> float:
     x_matrix = _as_row_matrix(x)
     y_vector = _as_vector(y)
-    if x_matrix.shape[0] != y_vector.shape[0]:
-        raise ValueError("x and y must agree on row dimension.")
-    if n_train <= 1 or n_train >= x_matrix.shape[0]:
+    if n_train >= x_matrix.shape[0]:
         return 0.0
-
-    x_train = x_matrix[:n_train]
-    y_train = y_vector[:n_train]
+    x_train_std, y_train, mean, safe_std_arr = _ridge_design_matrices(
+        x_matrix,
+        y_vector,
+        n_train=n_train,
+    )
     x_test = x_matrix[n_train:]
     y_test = y_vector[n_train:]
     if x_test.shape[0] == 0:
         return 0.0
-
-    mean = np.mean(x_train, axis=0, keepdims=True)
-    std = np.std(x_train, axis=0, ddof=1 if x_train.shape[0] > 1 else 0, keepdims=True)
-    safe_std_arr = np.where(std >= 1e-8, std, 1.0)
-    x_train_std = (x_train - mean) / safe_std_arr
     x_test_std = (x_test - mean) / safe_std_arr
-
-    design_train = np.concatenate(
-        [np.ones((x_train_std.shape[0], 1), dtype=np.float64), x_train_std],
-        axis=1,
+    predictions = _ridge_predict(
+        x_train_std,
+        y_train,
+        x_test_std,
+        alpha=alpha,
     )
-    design_test = np.concatenate(
-        [np.ones((x_test_std.shape[0], 1), dtype=np.float64), x_test_std],
-        axis=1,
-    )
-    ridge = np.eye(design_train.shape[1], dtype=np.float64)
-    ridge[0, 0] = 0.0
-    gram = design_train.T @ design_train + (float(alpha) * ridge)
-    rhs = design_train.T @ y_train
-    coeffs = np.linalg.solve(gram, rhs)
-    predictions = design_test @ coeffs
-
-    sse = float(np.sum((y_test - predictions) ** 2))
-    centered = y_test - float(np.mean(y_test))
-    sst = float(np.sum(centered**2))
-    if sst <= 1e-12:
-        return 0.0
-    return float(max(-1.0, min(1.0, 1.0 - (sse / sst))))
+    return _r2_score(y_test, predictions)
 
 
 def classify_difficulty(
@@ -197,8 +261,13 @@ def measure_sample_learnability(
     y_vector = _as_vector(y)
     train_std = safe_std(y_vector[:n_train])
     test_std = safe_std(y_vector[n_train:])
-    probe_r2 = (
-        ridge_probe_r2(x, y_vector, n_train=n_train) if compute_probe_r2 else None
+    probe_r2_train = (
+        ridge_probe_r2_train(x, y_vector, n_train=n_train) if compute_probe_r2 else None
+    )
+    probe_r2_holdout = (
+        ridge_probe_r2_holdout(x, y_vector, n_train=n_train)
+        if compute_probe_r2
+        else None
     )
     informative_count = count_informative_features(
         x,
@@ -208,7 +277,7 @@ def measure_sample_learnability(
     missing_frac = missing_fraction(observed_mask)
     block_missing_frac = max_block_missing_fraction(observed_mask)
     difficulty_bin = classify_difficulty(
-        probe_r2=probe_r2,
+        probe_r2=probe_r2_holdout,
         train_target_std=train_std,
         has_long_history=has_long_history,
         has_regimes=has_regimes,
@@ -222,7 +291,8 @@ def measure_sample_learnability(
         max_abs_target_value=float(np.max(np.abs(y_vector))) if y_vector.size else 0.0,
         informative_feature_count=informative_count,
         informative_feature_std_floor=float(informative_feature_std_floor),
-        probe_r2=probe_r2,
+        probe_r2_train=probe_r2_train,
+        probe_r2_holdout=probe_r2_holdout,
         missing_fraction=missing_frac,
         block_missing_fraction=block_missing_frac,
         difficulty_bin=difficulty_bin,

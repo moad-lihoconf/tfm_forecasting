@@ -173,6 +173,7 @@ def build_single_dynscm_sample(
         None
     )
     last_exc: RuntimeError | None = None
+    last_rejection_reason: str | None = None
     reject_counts = {
         "low_std": 0,
         "probe_r2_low": 0,
@@ -202,6 +203,7 @@ def build_single_dynscm_sample(
         rejection_reason = (
             sample_filter.rejection_reason(sample_metadata) if sample_filter else None
         )
+        last_rejection_reason = rejection_reason
         accepted = rejection_reason is None
         sample_metadata["sampled_filter_accept"] = int(accepted)
         if rejection_reason is not None:
@@ -213,20 +215,32 @@ def build_single_dynscm_sample(
         if last_exc is not None:
             raise last_exc
         raise RuntimeError("DynSCM sample generation failed to produce any sample.")
-    last_sample[2]["sampled_generation_attempts_used"] = int(attempt_count)
-    last_sample[2]["sampled_low_std_reject_count"] = int(reject_counts["low_std"])
-    last_sample[2]["sampled_probe_r2_reject_count"] = int(
+    metadata = last_sample[2]
+    metadata["sampled_generation_attempts_used"] = int(attempt_count)
+    metadata["sampled_low_std_reject_count"] = int(reject_counts["low_std"])
+    metadata["sampled_probe_r2_reject_count"] = int(
         reject_counts["probe_r2_low"] + reject_counts["probe_r2_high"]
     )
-    last_sample[2]["sampled_clipped_reject_count"] = int(reject_counts["clipped"])
-    last_sample[2]["sampled_max_abs_reject_count"] = int(reject_counts["max_abs_value"])
-    last_sample[2]["sampled_informative_feature_reject_count"] = int(
+    metadata["sampled_clipped_reject_count"] = int(reject_counts["clipped"])
+    metadata["sampled_max_abs_reject_count"] = int(reject_counts["max_abs_value"])
+    metadata["sampled_informative_feature_reject_count"] = int(
         reject_counts["informative_features_low"]
     )
-    last_sample[2]["sampled_missing_reject_count"] = int(
+    metadata["sampled_missing_reject_count"] = int(
         reject_counts["missing_fraction_high"]
         + reject_counts["block_missing_fraction_high"]
     )
+    if sample_filter is not None and not bool(metadata.get("sampled_filter_accept", 0)):
+        raise RuntimeError(
+            "DynSCM sample rejected after exhausting generation attempts: "
+            f"attempts={attempt_count}, "
+            f"last_reason={last_rejection_reason}, "
+            f"train_target_std={metadata.get('sampled_train_target_std')}, "
+            f"probe_r2_train={metadata.get('sampled_probe_r2_train')}, "
+            f"probe_r2_holdout={metadata.get('sampled_probe_r2_holdout')}, "
+            f"target_self_lag_weight={metadata.get('sampled_target_self_lag_weight')}, "
+            f"reject_counts={reject_counts}."
+        )
     return last_sample
 
 
@@ -384,8 +398,20 @@ def _build_single_dynscm_sample_once(
         "sampled_train_target_std": float(learnability.train_target_std),
         "sampled_test_target_std": float(learnability.test_target_std),
         "sampled_max_abs_target_value": float(learnability.max_abs_target_value),
+        "sampled_probe_r2_train": (
+            float(learnability.probe_r2_train)
+            if learnability.probe_r2_train is not None
+            else 0.0
+        ),
+        "sampled_probe_r2_holdout": (
+            float(learnability.probe_r2_holdout)
+            if learnability.probe_r2_holdout is not None
+            else 0.0
+        ),
         "sampled_probe_r2": (
-            float(learnability.probe_r2) if learnability.probe_r2 is not None else 0.0
+            float(learnability.probe_r2_holdout)
+            if learnability.probe_r2_holdout is not None
+            else 0.0
         ),
         "sampled_informative_feature_count": int(
             learnability.informative_feature_count
