@@ -457,6 +457,66 @@ def test_dynscm_cli_benchmark_aligned_mechanism_profile_only_increases_mechanism
     assert metadata["dynscm_config"]["kernel_family_probs"] == [0.8, 0.2]
 
 
+def test_dynscm_cli_benchmark_aligned_edges_soft_profile_adds_only_small_edge_drift(
+    tmp_path: Path,
+):
+    repo_root = Path(__file__).resolve().parents[1]
+    output_path = tmp_path / "dynscm_benchmark_aligned_edges_soft_profile.h5"
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "tfmplayground.priors",
+        "--lib",
+        "dynscm",
+        "--dynscm_profile",
+        "benchmark_aligned_edges_soft_16k",
+        "--num_batches",
+        "1",
+        "--batch_size",
+        "1",
+        "--max_classes",
+        "0",
+        "--np_seed",
+        "36",
+        "--dynscm_seed",
+        "36",
+        "--dynscm_workers",
+        "1",
+        "--dynscm_worker_blas_threads",
+        "1",
+        "--no_dynscm_compute_spectral_diagnostics",
+        "--save_path",
+        str(output_path),
+    ]
+    subprocess.run(
+        cmd,
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    with h5py.File(output_path, "r") as f:
+        raw_metadata = f["dump_metadata_json"][()]
+        metadata_text = (
+            raw_metadata.decode("utf-8")
+            if isinstance(raw_metadata, bytes)
+            else str(raw_metadata)
+        )
+        metadata = json.loads(metadata_text)
+
+    assert metadata["dynscm_profile"] == "benchmark_aligned_edges_soft_16k"
+    assert metadata["dynscm_config"]["num_regimes"] == 1
+    assert metadata["dynscm_config"]["missing_mode"] == "off"
+    assert metadata["dynscm_config"]["noise_family"] == "normal"
+    assert metadata["dynscm_config"]["max_lagged_parents"] == 2
+    assert metadata["dynscm_config"]["mechanism_type_probs"] == [0.7, 0.3]
+    assert metadata["dynscm_config"]["kernel_family_probs"] == [0.8, 0.2]
+    assert metadata["dynscm_config"]["lagged_edge_add_prob"] == 0.005
+    assert metadata["dynscm_config"]["lagged_edge_del_prob"] == 0.005
+
+
 def test_dynscm_cli_benchmark_aligned_medium_graph_profile_isolates_structure_changes(
     tmp_path: Path,
 ):
