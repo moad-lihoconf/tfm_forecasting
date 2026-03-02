@@ -137,8 +137,9 @@ def test_benchmark_contract_profiles_match_benchmark_shape_contract(
         assert cfg.test_rows_min == 32
         assert cfg.test_rows_max == 32
         assert cfg.forecast_horizons == (1, 2)
-        assert cfg.explicit_lags == (0, 1, 2, 5, 10)
-        assert cfg.num_kernels == 3
+        assert cfg.explicit_lags == (0, 1, 2)
+        assert cfg.num_kernels == 0
+        assert cfg.add_seasonality is False
         assert cfg.add_mask_channels is False
         assert cfg.missing_mode == "off"
         assert cfg.mechanism_type == "linear_var"

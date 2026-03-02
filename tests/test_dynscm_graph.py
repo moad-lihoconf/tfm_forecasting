@@ -162,3 +162,31 @@ def test_legacy_lag_sampler_mode_remains_available(dynscm_api):
 
     assert sample.regime_lagged_adjacency.shape == (cfg.num_regimes, cfg.max_lag, 5, 5)
     assert sample.target_lag_parent_counts_final.shape == (cfg.num_regimes,)
+
+
+def test_enforce_lagged_parent_invariants_respects_lag0_indegree_cap(dynscm_api):
+    config_mod, graph_mod = dynscm_api
+    cfg = config_mod.DynSCMConfig.from_dict(
+        {
+            "max_lag": 2,
+            "max_lagged_parents": 1,
+            "enforce_target_lagged_parent": True,
+            "target_self_lag_abs_min": 0.1,
+            "target_self_lag_min_budget_fraction": 0.2,
+        }
+    )
+    lagged = np.zeros((cfg.max_lag, 3, 3), dtype=bool)
+    # Target=2 already has one lag-1 parent; forcing self-lag must not overflow cap.
+    lagged[0, 1, 2] = True
+
+    out, forced_parent, forced_self = graph_mod._enforce_lagged_parent_invariants(
+        cfg=cfg,
+        lagged=lagged,
+        target_idx=2,
+        rng=np.random.default_rng(0),
+    )
+
+    assert forced_parent is True
+    assert forced_self is True
+    assert int(out[0, :, 2].sum()) <= cfg.max_lagged_parents
+    assert bool(out[0, 2, 2]) is True

@@ -580,11 +580,35 @@ def _nicl_post_json(
             if not isinstance(result, dict):
                 raise ValueError("NICL response must be a JSON object.")
             return result
+        except requests.HTTPError as exc:  # pragma: no cover
+            last_error = _rewrite_nicl_endpoint_error(exc)
+            if attempt + 1 < max_retries:
+                time.sleep(0.5 * (2**attempt))
         except Exception as exc:  # pragma: no cover
             last_error = exc
             if attempt + 1 < max_retries:
                 time.sleep(0.5 * (2**attempt))
     raise AdapterSkipError(f"NICL request failed after retries: {last_error}")
+
+
+def _rewrite_nicl_endpoint_error(exc: requests.HTTPError) -> Exception:
+    """Attach endpoint hint for the common dashboard-vs-API URL mismatch."""
+    response = exc.response
+    if response is None:
+        return exc
+    status_code = response.status_code
+    request_url = str(response.url)
+    if (
+        status_code == 405
+        and request_url.rstrip("/") == "https://prediction.neuralk-ai.com/predict"
+    ):
+        return RuntimeError(
+            "405 Not Allowed at dashboard URL "
+            "'https://prediction.neuralk-ai.com/predict'. "
+            "Use NICL API endpoint "
+            "'https://api.prediction.neuralk-ai.com/api/v1/inference' instead."
+        )
+    return exc
 
 
 def _resolve_nicl_token(token_env: str) -> str:

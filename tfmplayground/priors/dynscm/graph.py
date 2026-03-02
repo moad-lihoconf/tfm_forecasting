@@ -596,6 +596,33 @@ def _enforce_lagged_parent_invariants(
 ) -> tuple[np.ndarray, bool, bool]:
     output = lagged.copy()
     num_lags, num_vars, _ = output.shape
+    max_parents = int(cfg.max_lagged_parents)
+
+    def _trim_lag0_incoming(target: int, *, preserve_source: int | None = None) -> None:
+        if max_parents <= 0:
+            output[0, :, target] = False
+            return
+        incoming = np.flatnonzero(output[0, :, target])
+        if incoming.size <= max_parents:
+            return
+        keep: set[int] = set()
+        if preserve_source is not None and int(preserve_source) in incoming:
+            keep.add(int(preserve_source))
+        remaining_budget = max(0, max_parents - len(keep))
+        candidates = np.asarray(
+            [int(source) for source in incoming.tolist() if int(source) not in keep],
+            dtype=np.int64,
+        )
+        if remaining_budget > 0 and candidates.size > 0:
+            if candidates.size > remaining_budget:
+                chosen = rng.choice(candidates, size=remaining_budget, replace=False)
+                keep.update(map(int, np.asarray(chosen).tolist()))
+            else:
+                keep.update(map(int, candidates.tolist()))
+        output[0, :, target] = False
+        for source in keep:
+            output[0, int(source), target] = True
+
     required_targets: set[int] = set()
     if cfg.enforce_all_nodes_lagged_parent:
         required_targets.update(range(num_vars))
@@ -615,6 +642,7 @@ def _enforce_lagged_parent_invariants(
         output[0, int(target_idx), int(target_idx)] = True
         forced_target_parent = True
         forced_target_self = True
+        _trim_lag0_incoming(int(target_idx), preserve_source=int(target_idx))
 
     for target in sorted(required_targets):
         if np.any(output[:, :, target]):
@@ -629,6 +657,7 @@ def _enforce_lagged_parent_invariants(
         )
         source = int(target) if use_self_edge else int(rng.integers(0, num_vars))
         output[0, source, target] = True
+        _trim_lag0_incoming(int(target), preserve_source=source)
         if target_idx is not None and target == target_idx:
             forced_target_parent = True
             forced_target_self = bool(source == target)

@@ -23,6 +23,7 @@ DEFAULT_RESEARCH_WARM_START_CHECKPOINT = (
 GUARDRAIL_MAX_SAMPLE_ATTEMPTS = 16
 LIVE_MAX_SEQ_LEN = 48
 LIVE_MAX_FEATURES = 64
+BENCHMARK_CONTRACT_MAX_SEQ_LEN = 96
 COMMON_BATCH_SHARED_FIELDS = (
     "mechanism_type",
     "noise_family",
@@ -402,9 +403,10 @@ def _benchmark_contract_base_cfg() -> DynSCMConfig:
             series_length_min=128,
             series_length_max=256,
             forecast_horizons=SHORT_RESEARCH_HORIZONS,
-            explicit_lags=(0, 1, 2, 5, 10),
-            num_kernels=3,
+            explicit_lags=(0, 1, 2),
+            num_kernels=0,
             max_feature_lag=32,
+            add_seasonality=False,
             add_mask_channels=True,
             use_contemp_edges=False,
             max_contemp_parents=0,
@@ -916,6 +918,7 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
         warm_start_checkpoint=DEFAULT_RESEARCH_WARM_START_CHECKPOINT,
         train_seed=2602,
         val_seed=3602,
+        max_seq_len=BENCHMARK_CONTRACT_MAX_SEQ_LEN,
     )
     benchmark_contract_easy_matched_val = replace(
         benchmark_contract_easy,
@@ -939,6 +942,7 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
         warm_start_checkpoint=DEFAULT_RESEARCH_WARM_START_CHECKPOINT,
         train_seed=2603,
         val_seed=3603,
+        max_seq_len=BENCHMARK_CONTRACT_MAX_SEQ_LEN,
     )
     norm_none = replace(
         mode_ladder,
@@ -965,6 +969,7 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
             max_sample_attempts_per_item=GUARDRAIL_MAX_SAMPLE_ATTEMPTS,
         ),
         val_source=_single_source(benchmark_contract_observed_easy_cfg()),
+        max_seq_len=BENCHMARK_CONTRACT_MAX_SEQ_LEN,
     )
     integration_easy_stable_batch = replace(
         integration_easy,
@@ -1025,6 +1030,7 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
             max_sample_attempts_per_item=GUARDRAIL_MAX_SAMPLE_ATTEMPTS,
         ),
         val_source=_single_source(benchmark_contract_observed_temporal_cfg()),
+        max_seq_len=BENCHMARK_CONTRACT_MAX_SEQ_LEN,
     )
     return {
         profile.name: profile

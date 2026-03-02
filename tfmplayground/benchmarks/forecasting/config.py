@@ -89,7 +89,7 @@ class ModelConfig(_FrozenConfigModel):
     model_dynscm_dist: str | None = None
     tabicl_checkpoint_version: str = "tabicl-regressor-v2-20260212.ckpt"
     tabicl_model_path: str | None = None
-    nicl_api_url: str = "https://prediction.neuralk-ai.com/predict"
+    nicl_api_url: str = "https://api.prediction.neuralk-ai.com/api/v1/inference"
     nicl_regression_mode: Literal["off", "native", "quantized_proxy"] = "off"
     nicl_regression_endpoint: str | None = None
     nicl_model: str = "nicl-small"

@@ -31,7 +31,7 @@
     "model_dynscm_ckpt": "workdir/local_1h/nanotabpfn_dynscm_1h_weights.pth",
     "model_dynscm_dist": "workdir/local_1h/nanotabpfn_dynscm_1h_buckets.pth",
     "nicl_regression_mode": "quantized_proxy",
-    "nicl_regression_endpoint": "https://prediction.neuralk-ai.com/predict",
+    "nicl_regression_endpoint": "https://api.prediction.neuralk-ai.com/api/v1/inference",
     "nicl_model": "nicl-small"
   },
   "stats": {
