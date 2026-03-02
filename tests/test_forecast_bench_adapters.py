@@ -294,6 +294,82 @@ def test_nicl_regression_quantized_proxy_tar_transport(monkeypatch):
     assert "X-Content-SHA256" in sent["headers"]
 
 
+def test_nicl_regression_quantized_proxy_falls_back_to_native_on_binning_failure(
+    monkeypatch,
+):
+    monkeypatch.setenv("NEURALK_API_KEY", "secret")
+
+    class _TaskAwareSession:
+        def __init__(self):
+            self.requests = []
+
+        def post(self, *args, **kwargs):
+            payload = kwargs.get("json", {})
+            self.requests.append(payload)
+            if payload.get("task") == "regression":
+                return _FakeResponse({"predictions": [1.25, 1.75]})
+            return _FakeResponse(
+                {
+                    "probabilities": [[1.0, 0.0], [0.0, 1.0]],
+                    "predictions": [0, 1],
+                }
+            )
+
+    session = _TaskAwareSession()
+    adapter = NICLRegressionAdapter(
+        api_url="https://example.com/cls",
+        timeout_seconds=1.0,
+        max_retries=1,
+        mode="quantized_proxy",
+        session=session,
+        proxy_num_classes=4,
+        min_samples_per_class=1,
+    )
+
+    # Constant labels make quantile classes collapse.
+    y_train = np.ones((6,), dtype=np.float64)
+    pred = adapter.fit_predict(
+        np.zeros((6, 3), dtype=np.float64),
+        y_train,
+        np.zeros((2, 3), dtype=np.float64),
+    )
+
+    assert pred.shape == (2,)
+    assert np.allclose(pred, [1.25, 1.75])
+    assert len(session.requests) == 1
+    assert session.requests[0]["task"] == "regression"
+
+
+def test_nicl_regression_quantized_proxy_falls_back_to_train_mean_if_native_fails(
+    monkeypatch,
+):
+    monkeypatch.setenv("NEURALK_API_KEY", "secret")
+
+    class _AlwaysFailSession:
+        def post(self, *args, **kwargs):
+            raise RuntimeError("network down")
+
+    adapter = NICLRegressionAdapter(
+        api_url="https://example.com/cls",
+        timeout_seconds=1.0,
+        max_retries=1,
+        mode="quantized_proxy",
+        session=_AlwaysFailSession(),
+        proxy_num_classes=4,
+        min_samples_per_class=1,
+    )
+
+    y_train = np.ones((6,), dtype=np.float64) * 3.5
+    pred = adapter.fit_predict(
+        np.zeros((6, 3), dtype=np.float64),
+        y_train,
+        np.zeros((2, 3), dtype=np.float64),
+    )
+
+    assert pred.shape == (2,)
+    assert np.allclose(pred, [3.5, 3.5])
+
+
 def test_nicl_regression_rejects_invalid_proxy_num_classes_string():
     with pytest.raises(ValueError, match="proxy_num_classes"):
         NICLRegressionAdapter(

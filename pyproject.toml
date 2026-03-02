@@ -36,6 +36,7 @@ tensorboard = { version = ">=2.19", optional = true }
 pytest = "^9.0.2"
 neuralk = "^0.1.1"
 gcloud = "^0.18.3"
+statsmodels = "^0.14.6"
 
 [tool.poetry.extras]
 wandb = ["wandb"]
