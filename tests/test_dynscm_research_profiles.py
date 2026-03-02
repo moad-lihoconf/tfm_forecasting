@@ -16,11 +16,13 @@ def test_research_profiles_define_expected_names(priors_modules) -> None:
         "temporal_length_plus_regimes_16k",
         "temporal_full_medium32k_reference",
         "benchmark_contract_observed_easy",
+        "benchmark_contract_observed_easy_matched_val",
         "benchmark_contract_observed_temporal",
         "mode_ladder_norm_none",
         "mode_ladder_norm_zscore",
         "mode_ladder_norm_clamped",
         "integration_contract_easy",
+        "integration_contract_easy_stable_batch",
         "integration_contract_temporal",
     )
 
@@ -140,6 +142,9 @@ def test_benchmark_contract_profiles_match_benchmark_shape_contract(
         assert cfg.mechanism_type == "linear_var"
         assert cfg.noise_family == "normal"
         assert cfg.kernel_family == "exp_decay"
+        assert cfg.noise_scale_min == 0.08
+        assert cfg.noise_scale_max == 0.08
+        assert cfg.noise_scale_schedule_tag is None
         assert cfg.enforce_target_lagged_parent is True
         assert cfg.learnability_probe is True
         assert (cfg.series_length_min, cfg.series_length_max) == expected_series[name]
@@ -213,6 +218,37 @@ def test_mode_ladder_temporal_only_mode_disables_hidden_regime_and_drift_shift(
     assert temporal_only.cfg_overrides["drift_std"] == 0.0
 
 
+def test_mode_ladder_v2_adds_incremental_complexity_modes(priors_modules) -> None:
+    profiles_mod = priors_modules["research_profiles"]
+    profile = profiles_mod.get_research_profile("medium32k_live_mode_ladder")
+    mode_map = {mode.name: mode.cfg_overrides for mode in profile.train_source.modes}
+
+    assert tuple(mode_map) == (
+        "graph_only",
+        "temporal_only",
+        "kernels_only",
+        "missing_easy",
+        "residual_easy",
+        "regimes_easy",
+        "full",
+    )
+    assert mode_map["graph_only"]["num_kernels"] == 0
+    assert mode_map["graph_only"]["add_seasonality"] is False
+    assert mode_map["kernels_only"]["num_kernels"] == 1
+    assert mode_map["missing_easy"]["missing_mode"] == "mcar"
+    assert mode_map["missing_easy"]["missing_rate_min"] == 0.01
+    assert mode_map["missing_easy"]["missing_rate_max"] == 0.06
+    assert mode_map["missing_easy"]["block_missing_prob"] == 0.0
+    assert mode_map["residual_easy"]["mechanism_type_choices"] == (
+        "linear_var",
+        "linear_plus_residual",
+    )
+    assert mode_map["residual_easy"]["mechanism_type_probs"] == (0.8, 0.2)
+    assert mode_map["residual_easy"]["residual_lipschitz_max"] == 0.03
+    assert mode_map["regimes_easy"]["num_regimes"] == 2
+    assert mode_map["regimes_easy"]["drift_std"] == 0.005
+
+
 def test_non_baseline_profiles_validate_on_raw_target_cfg(priors_modules) -> None:
     profiles_mod = priors_modules["research_profiles"]
     target_cfg = profiles_mod.target_learnable_cfg()
@@ -225,6 +261,57 @@ def test_non_baseline_profiles_validate_on_raw_target_cfg(priors_modules) -> Non
     ):
         profile = profiles_mod.get_research_profile(name)
         assert profile.val_source.cfg == target_cfg
+
+
+def test_benchmark_contract_easy_uses_stricter_high_signal_filter(
+    priors_modules,
+) -> None:
+    profiles_mod = priors_modules["research_profiles"]
+    profile = profiles_mod.get_research_profile("benchmark_contract_observed_easy")
+
+    assert profile.train_source.sample_filter is not None
+    assert profile.train_source.sample_filter.min_probe_train_r2 == 0.15
+    assert profile.train_source.sample_filter.max_probe_train_r2 == 0.95
+    assert profile.train_source.sample_filter.min_informative_feature_count == 8
+    assert profile.val_source.sample_filter is None
+
+
+def test_benchmark_contract_easy_matched_val_uses_strict_filter_for_both_splits(
+    priors_modules,
+) -> None:
+    profiles_mod = priors_modules["research_profiles"]
+    profile = profiles_mod.get_research_profile(
+        "benchmark_contract_observed_easy_matched_val"
+    )
+
+    assert profile.train_source.sample_filter is not None
+    assert profile.train_source.sample_filter.min_probe_train_r2 == 0.15
+    assert profile.train_source.sample_filter.max_probe_train_r2 == 0.95
+    assert profile.train_source.sample_filter.min_informative_feature_count == 8
+    assert profile.val_source.sample_filter is not None
+    assert profile.val_source.sample_filter.min_probe_train_r2 == 0.15
+    assert profile.val_source.sample_filter.max_probe_train_r2 == 0.95
+    assert profile.val_source.sample_filter.min_informative_feature_count == 8
+    assert (
+        profile.val_source.max_sample_attempts_per_item
+        == profiles_mod.GUARDRAIL_MAX_SAMPLE_ATTEMPTS
+    )
+
+
+def test_integration_contract_easy_stable_batch_shares_latent_system_within_batch(
+    priors_modules,
+) -> None:
+    profiles_mod = priors_modules["research_profiles"]
+    profile = profiles_mod.get_research_profile(
+        "integration_contract_easy_stable_batch"
+    )
+
+    assert profile.train_source.share_system_within_batch is True
+    assert profile.val_source.share_system_within_batch is True
+    assert profile.train_source.sample_filter is not None
+    assert profile.val_source.sample_filter is not None
+    assert profile.train_source.sample_filter.min_probe_train_r2 == 0.15
+    assert profile.val_source.sample_filter.min_probe_train_r2 == 0.15
 
 
 def test_normalization_ablation_profiles_only_change_target_normalization(
@@ -300,12 +387,12 @@ def test_surviving_curriculum_profiles_use_shorter_early_series_windows(
     }
     assert mode_map["graph_only"]["series_length_min"] == 64
     assert mode_map["graph_only"]["series_length_max"] == 128
-    assert mode_map["noise_only"]["noise_family"] == "normal"
-    assert mode_map["missing_only"]["missing_mode"] == "mcar"
-    assert mode_map["missing_only"]["missing_mode_probs"] == (0.9, 0.1)
-    assert mode_map["missing_only"]["missing_rate_min"] == 0.02
-    assert mode_map["missing_only"]["missing_rate_max"] == 0.08
-    assert mode_map["missing_only"]["block_missing_prob"] == 0.0
+    assert mode_map["kernels_only"]["num_kernels"] == 1
+    assert mode_map["missing_easy"]["missing_mode"] == "mcar"
+    assert mode_map["missing_easy"]["missing_mode_choices"] is None
+    assert mode_map["missing_easy"]["missing_rate_min"] == 0.01
+    assert mode_map["missing_easy"]["missing_rate_max"] == 0.06
+    assert mode_map["missing_easy"]["block_missing_prob"] == 0.0
     assert mode_map["temporal_only"]["series_length_min"] == 96
     assert mode_map["temporal_only"]["series_length_max"] == 128
     assert mode_ladder.train_source.sample_filter is not None
@@ -318,6 +405,24 @@ def test_surviving_curriculum_profiles_use_shorter_early_series_windows(
     assert child_sources["stable_cfg"].series_length_max == 128
     assert child_sources["temporal_cfg"].series_length_min == 96
     assert child_sources["temporal_cfg"].series_length_max == 128
+
+
+def test_mode_ladder_schedule_widens_complexity_gradually(priors_modules) -> None:
+    profiles_mod = priors_modules["research_profiles"]
+    schedule = profiles_mod.get_research_profile(
+        "medium32k_live_mode_ladder"
+    ).train_source.schedule
+
+    assert schedule is not None
+    early = tuple(round(v, 4) for v in schedule.weights_at(0.10))
+    middle = tuple(round(v, 4) for v in schedule.weights_at(0.65))
+    late = tuple(round(v, 4) for v in schedule.weights_at(0.95))
+
+    assert early == (0.4, 0.35, 0.25, 0.0, 0.0, 0.0, 0.0)
+    assert middle[3] > 0.0
+    assert middle[4] > 0.0
+    assert late[5] > 0.0
+    assert late[6] > 0.0
 
 
 def test_build_promotion_profile_upgrades_training_source_to_full_cfg(

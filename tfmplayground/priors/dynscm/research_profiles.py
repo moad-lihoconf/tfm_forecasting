@@ -108,6 +108,7 @@ class LiveSourceSpec:
     sample_filter: DynSCMSampleFilterConfig | None = None
     max_sample_attempts_per_item: int = 1
     batch_shared_fields: tuple[str, ...] = ()
+    share_system_within_batch: bool = False
     modes: tuple[DynSCMBatchMode, ...] = ()
     schedule: LinearPhaseSchedule | None = None
     child_sources: tuple[tuple[str, DynSCMConfig], ...] = ()
@@ -422,14 +423,15 @@ def _benchmark_contract_base_cfg() -> DynSCMConfig:
             kernel_family="exp_decay",
             kernel_family_choices=None,
             kernel_family_probs=None,
-            noise_scale_min=0.15,
-            noise_scale_max=0.60,
-            noise_scale_schedule_tag="benchmark_contract_scale_up",
+            # Keep the bootstrap contract branch in a narrow, high-signal noise band.
+            noise_scale_min=0.08,
+            noise_scale_max=0.08,
+            noise_scale_schedule_tag=None,
         ),
         min_informative_feature_count=8,
         normal_noise_only=True,
         keep_mask_channels=False,
-        noise_scale_schedule_tag="benchmark_contract_scale_up",
+        noise_scale_schedule_tag=None,
         forecast_horizons_override=None,
         self_lag_prob=0.90,
         self_lag_decay_rate=0.10,
@@ -492,6 +494,14 @@ def _preserve_guardrail_strategy(
 
 def _guardrail_filter() -> DynSCMSampleFilterConfig:
     return _learnability_filter(min_informative_feature_count=10)
+
+
+def _benchmark_contract_easy_filter() -> DynSCMSampleFilterConfig:
+    return _learnability_filter(
+        min_informative_feature_count=8,
+        min_probe_train_r2=0.15,
+        max_probe_train_r2=0.95,
+    )
 
 
 def _mode_ladder_filter() -> DynSCMSampleFilterConfig:
@@ -566,6 +576,7 @@ def _single_source(
     cfg: DynSCMConfig,
     *,
     batch_shared_fields: tuple[str, ...] = (),
+    share_system_within_batch: bool = False,
     sample_filter: DynSCMSampleFilterConfig | None = None,
     max_sample_attempts_per_item: int = 1,
 ) -> LiveSourceSpec:
@@ -575,6 +586,7 @@ def _single_source(
         sample_filter=sample_filter,
         max_sample_attempts_per_item=max_sample_attempts_per_item,
         batch_shared_fields=batch_shared_fields,
+        share_system_within_batch=share_system_within_batch,
     )
 
 
@@ -601,80 +613,65 @@ def _mode_ladder_modes() -> tuple[DynSCMBatchMode, ...]:
         "kernel_family": "exp_decay",
         "kernel_family_choices": None,
         "kernel_family_probs": None,
+        "num_kernels": 0,
+        "add_seasonality": False,
     }
-    easy_non_noise_overrides = {
+    kernels_only_overrides = {
         **easy_graph_overrides,
-        "noise_family": "normal",
-        "noise_family_choices": None,
-        "noise_family_probs": None,
+        "num_kernels": 1,
     }
     return (
         DynSCMBatchMode(
             name="graph_only",
             cfg_overrides={
-                "num_regimes": 1,
-                "sticky_rho": 1.0,
-                "shared_order": True,
-                "share_base_graph": True,
-                "drift_std": 0.0,
-                "series_length_min": EARLY_STAGE_SERIES_LENGTH_MIN,
-                "series_length_max": EARLY_STAGE_SERIES_LENGTH_MAX,
-                "noise_family": "normal",
-                "noise_family_choices": None,
-                "noise_family_probs": None,
-                "missing_mode": "off",
-                "missing_mode_choices": None,
-                "missing_mode_probs": None,
-                "kernel_family": "exp_decay",
-                "kernel_family_choices": None,
-                "kernel_family_probs": None,
-            },
-        ),
-        DynSCMBatchMode(
-            name="noise_only",
-            cfg_overrides={
                 **easy_graph_overrides,
-                "noise_family": "normal",
-                "noise_family_choices": None,
-                "noise_family_probs": None,
-                "noise_scale_min": 0.12,
-                "noise_scale_max": 0.24,
-            },
-        ),
-        DynSCMBatchMode(
-            name="missing_only",
-            cfg_overrides={
-                **easy_non_noise_overrides,
-                "missing_mode": "mcar",
-                "missing_mode_choices": ("off", "mcar"),
-                "missing_mode_probs": (0.9, 0.1),
-                "missing_rate_min": 0.02,
-                "missing_rate_max": 0.08,
-                "block_missing_prob": 0.0,
             },
         ),
         DynSCMBatchMode(
             name="temporal_only",
             cfg_overrides={
-                "num_regimes": 1,
-                "sticky_rho": 1.0,
-                "shared_order": True,
-                "share_base_graph": True,
-                "drift_std": 0.0,
-                "lagged_edge_add_prob": 0.0,
-                "lagged_edge_del_prob": 0.0,
-                "mechanism_type": "linear_var",
-                "mechanism_type_choices": None,
-                "mechanism_type_probs": None,
-                "noise_family": "normal",
-                "noise_family_choices": None,
-                "noise_family_probs": None,
-                "missing_mode": "off",
+                **easy_graph_overrides,
+                "series_length_min": EARLY_STAGE_TEMPORAL_SERIES_LENGTH_MIN,
+                "series_length_max": EARLY_STAGE_TEMPORAL_SERIES_LENGTH_MAX,
+            },
+        ),
+        DynSCMBatchMode(
+            name="kernels_only",
+            cfg_overrides={
+                **kernels_only_overrides,
+            },
+        ),
+        DynSCMBatchMode(
+            name="missing_easy",
+            cfg_overrides={
+                **kernels_only_overrides,
+                "missing_mode": "mcar",
                 "missing_mode_choices": None,
                 "missing_mode_probs": None,
-                "kernel_family": "exp_decay",
-                "kernel_family_choices": None,
-                "kernel_family_probs": None,
+                "missing_rate_min": 0.01,
+                "missing_rate_max": 0.06,
+                "block_missing_prob": 0.0,
+            },
+        ),
+        DynSCMBatchMode(
+            name="residual_easy",
+            cfg_overrides={
+                **kernels_only_overrides,
+                "mechanism_type": "linear_var",
+                "mechanism_type_choices": ("linear_var", "linear_plus_residual"),
+                "mechanism_type_probs": (0.8, 0.2),
+                "residual_lipschitz_max": 0.03,
+            },
+        ),
+        DynSCMBatchMode(
+            name="regimes_easy",
+            cfg_overrides={
+                **kernels_only_overrides,
+                "num_regimes": 2,
+                "sticky_rho": 0.95,
+                "shared_order": True,
+                "share_base_graph": True,
+                "drift_std": 0.005,
                 "series_length_min": EARLY_STAGE_TEMPORAL_SERIES_LENGTH_MIN,
                 "series_length_max": EARLY_STAGE_TEMPORAL_SERIES_LENGTH_MAX,
             },
@@ -686,9 +683,17 @@ def _mode_ladder_modes() -> tuple[DynSCMBatchMode, ...]:
 def _mode_ladder_schedule() -> LinearPhaseSchedule:
     return LinearPhaseSchedule(
         [
-            (0.5, (0.40, 0.05, 0.05, 0.50, 0.0), None),
-            (0.8, (0.40, 0.05, 0.05, 0.50, 0.0), (0.22, 0.08, 0.08, 0.32, 0.30)),
-            (1.0, (0.22, 0.08, 0.08, 0.32, 0.30), (0.12, 0.06, 0.06, 0.21, 0.55)),
+            (0.5, (0.40, 0.35, 0.25, 0.0, 0.0, 0.0, 0.0), None),
+            (
+                0.8,
+                (0.40, 0.35, 0.25, 0.0, 0.0, 0.0, 0.0),
+                (0.18, 0.17, 0.25, 0.18, 0.14, 0.08, 0.0),
+            ),
+            (
+                1.0,
+                (0.18, 0.17, 0.25, 0.18, 0.14, 0.08, 0.0),
+                (0.08, 0.08, 0.14, 0.13, 0.13, 0.18, 0.26),
+            ),
         ]
     )
 
@@ -894,7 +899,7 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
         name="benchmark_contract_observed_easy",
         train_source=_single_source(
             benchmark_contract_observed_easy_cfg(),
-            sample_filter=_learnability_filter(min_informative_feature_count=8),
+            sample_filter=_benchmark_contract_easy_filter(),
             max_sample_attempts_per_item=GUARDRAIL_MAX_SAMPLE_ATTEMPTS,
         ),
         val_source=_single_source(benchmark_contract_observed_easy_cfg()),
@@ -903,6 +908,15 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
         warm_start_checkpoint=DEFAULT_RESEARCH_WARM_START_CHECKPOINT,
         train_seed=2602,
         val_seed=3602,
+    )
+    benchmark_contract_easy_matched_val = replace(
+        benchmark_contract_easy,
+        name="benchmark_contract_observed_easy_matched_val",
+        val_source=_single_source(
+            benchmark_contract_observed_easy_cfg(),
+            sample_filter=_benchmark_contract_easy_filter(),
+            max_sample_attempts_per_item=GUARDRAIL_MAX_SAMPLE_ATTEMPTS,
+        ),
     )
     benchmark_contract_temporal = DynSCMLiveResearchProfile(
         name="benchmark_contract_observed_temporal",
@@ -939,10 +953,27 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
         train_source=_single_source(
             benchmark_contract_observed_easy_cfg(),
             batch_shared_fields=COMMON_BATCH_SHARED_FIELDS,
-            sample_filter=_learnability_filter(min_informative_feature_count=8),
+            sample_filter=_benchmark_contract_easy_filter(),
             max_sample_attempts_per_item=GUARDRAIL_MAX_SAMPLE_ATTEMPTS,
         ),
         val_source=_single_source(benchmark_contract_observed_easy_cfg()),
+    )
+    integration_easy_stable_batch = replace(
+        integration_easy,
+        name="integration_contract_easy_stable_batch",
+        train_source=_single_source(
+            benchmark_contract_observed_easy_cfg(),
+            batch_shared_fields=COMMON_BATCH_SHARED_FIELDS,
+            share_system_within_batch=True,
+            sample_filter=_benchmark_contract_easy_filter(),
+            max_sample_attempts_per_item=GUARDRAIL_MAX_SAMPLE_ATTEMPTS,
+        ),
+        val_source=_single_source(
+            benchmark_contract_observed_easy_cfg(),
+            sample_filter=_benchmark_contract_easy_filter(),
+            max_sample_attempts_per_item=GUARDRAIL_MAX_SAMPLE_ATTEMPTS,
+            share_system_within_batch=True,
+        ),
     )
     integration_temporal = replace(
         mode_ladder,
@@ -970,11 +1001,13 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
             temporal_length_plus_regimes,
             temporal_full_reference,
             benchmark_contract_easy,
+            benchmark_contract_easy_matched_val,
             benchmark_contract_temporal,
             norm_none,
             norm_zscore,
             norm_clamped,
             integration_easy,
+            integration_easy_stable_batch,
             integration_temporal,
         )
     }

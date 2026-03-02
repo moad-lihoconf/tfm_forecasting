@@ -38,6 +38,7 @@ class DynSCMWorkerTask:
     cfg_overrides: dict[str, object] | None = None
     filter_payload: dict[str, object] | None = None
     max_generation_attempts: int = 1
+    shared_system_seed: int | None = None
 
 
 def configure_worker_runtime(*, blas_threads: int) -> None:
@@ -78,6 +79,7 @@ def generate_dynscm_worker_sample(
         cfg_overrides=task.cfg_overrides,
         sample_filter=DynSCMSampleFilterConfig.from_payload(task.filter_payload),
         max_generation_attempts=task.max_generation_attempts,
+        shared_system_seed=task.shared_system_seed,
     )
 
 
@@ -164,6 +166,7 @@ def build_single_dynscm_sample(
     cfg_overrides: Mapping[str, object] | None = None,
     sample_filter: DynSCMSampleFilterConfig | None = None,
     max_generation_attempts: int = 1,
+    shared_system_seed: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, int | float | str]]:
     """Generate exactly one padded DynSCM `(x_i, y_i)` sample."""
     if max_generation_attempts < 1:
@@ -196,6 +199,7 @@ def build_single_dynscm_sample(
                 n_test=n_test,
                 row_budget=row_budget,
                 num_features=num_features,
+                shared_system_seed=shared_system_seed,
             )
         except RuntimeError as exc:
             last_exc = exc
@@ -274,42 +278,63 @@ def _build_single_dynscm_sample_once(
     n_test: int,
     row_budget: int,
     num_features: int,
+    shared_system_seed: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, int | float | str]]:
-    sample_rng = cfg.make_rng(sample_seed)
-    variant_cfg, variant_metadata = sample_dynscm_variant_cfg(cfg, sample_rng)
-    num_vars, num_steps, y_idx = sample_dataset_dimensions(variant_cfg, sample_rng)
-    per_sample_seeds = sample_rng.integers(
-        0,
-        _SEED_MAX,
-        size=(7,),
-        dtype=np.int64,
-    )
+    if shared_system_seed is None:
+        sample_rng = cfg.make_rng(sample_seed)
+        variant_cfg, variant_metadata = sample_dynscm_variant_cfg(cfg, sample_rng)
+        num_vars, num_steps, y_idx = sample_dataset_dimensions(variant_cfg, sample_rng)
+        per_sample_seeds = sample_rng.integers(
+            0,
+            _SEED_MAX,
+            size=(7,),
+            dtype=np.int64,
+        )
+        system_seeds = per_sample_seeds[:4]
+        sample_seeds = per_sample_seeds[4:]
+    else:
+        system_rng = cfg.make_rng(shared_system_seed)
+        variant_cfg, variant_metadata = sample_dynscm_variant_cfg(cfg, system_rng)
+        num_vars, num_steps, y_idx = sample_dataset_dimensions(variant_cfg, system_rng)
+        system_seeds = system_rng.integers(
+            0,
+            _SEED_MAX,
+            size=(4,),
+            dtype=np.int64,
+        )
+        sample_rng = cfg.make_rng(sample_seed)
+        sample_seeds = sample_rng.integers(
+            0,
+            _SEED_MAX,
+            size=(3,),
+            dtype=np.int64,
+        )
 
     graph_sample = sample_regime_graphs(
         variant_cfg,
         num_vars=num_vars,
         target_idx=y_idx,
-        seed=int(per_sample_seeds[0]),
+        seed=int(system_seeds[0]),
     )
     stability_sample = sample_stable_coefficients(
         variant_cfg,
         graph_sample,
         target_idx=y_idx,
-        seed=int(per_sample_seeds[1]),
+        seed=int(system_seeds[1]),
     )
     mechanism_sample = sample_regime_mechanisms(
         variant_cfg,
         graph_sample,
         stability_sample=stability_sample,
         target_idx=y_idx,
-        seed=int(per_sample_seeds[2]),
+        seed=int(system_seeds[2]),
     )
     simulation_sample = simulate_dynscm_series(
         variant_cfg,
         graph_sample,
         mechanism_sample,
         num_steps=num_steps,
-        seed=int(per_sample_seeds[3]),
+        seed=int(system_seeds[3]),
     )
 
     series = simulation_sample.series[None, :, :].astype(np.float64, copy=False)
@@ -321,12 +346,12 @@ def _build_single_dynscm_sample_once(
         num_steps=num_steps,
         n_train=n_train,
         n_test=n_test,
-        seed=int(per_sample_seeds[4]),
+        seed=int(sample_seeds[0]),
     )
     obs_mask = sample_observation_mask(
         variant_cfg,
         series,
-        seed=int(per_sample_seeds[5]),
+        seed=int(sample_seeds[1]),
         label_times=t_idx + h_idx,
         label_var_indices=y_index,
     )
@@ -340,7 +365,7 @@ def _build_single_dynscm_sample_once(
         t_idx=t_idx,
         h_idx=h_idx,
         obs_mask=obs_mask,
-        seed=int(per_sample_seeds[6]),
+        seed=int(sample_seeds[2]),
     )
 
     x_prioritized = prioritize_feature_blocks(
@@ -461,6 +486,8 @@ def _build_single_dynscm_sample_once(
         ),
         "sampled_filter_accept": 1,
     }
+    if shared_system_seed is not None:
+        sample_metadata["sampled_shared_system_seed"] = int(shared_system_seed)
 
     return (
         x_padded[0].astype(np.float32, copy=False),

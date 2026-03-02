@@ -394,6 +394,43 @@ def test_parallel_matches_serial_with_batch_shared_overrides(dynscm_api):
             assert value == batch_parallel[key]
 
 
+def test_share_system_within_batch_pins_latent_system_structure(dynscm_api):
+    config_mod, get_batch_mod = dynscm_api
+    cfg = config_mod.DynSCMConfig.from_dict(
+        {
+            "num_variables_min": 3,
+            "num_variables_max": 8,
+            "series_length_min": 96,
+            "series_length_max": 140,
+            "max_lag": 8,
+            "train_rows_min": 8,
+            "train_rows_max": 8,
+            "test_rows_min": 4,
+            "test_rows_max": 4,
+            "mechanism_type_choices": ["linear_var", "linear_plus_residual"],
+            "mechanism_type_probs": [0.5, 0.5],
+            "noise_family_choices": ["normal", "student_t"],
+            "noise_family_probs": [0.5, 0.5],
+            "student_df_min": 3.5,
+            "student_df_max": 8.0,
+        }
+    )
+    get_batch = get_batch_mod.make_get_batch_dynscm(
+        cfg,
+        device=torch.device("cpu"),
+        seed=71,
+        share_system_within_batch=True,
+    )
+    batch = get_batch(batch_size=8, num_datapoints_max=16, num_features=24)
+
+    assert "sampled_shared_system_seed" in batch
+    assert torch.unique(batch["sampled_shared_system_seed"]).numel() == 1
+    assert torch.unique(batch["sampled_num_vars"]).numel() == 1
+    assert torch.unique(batch["sampled_mechanism_type_id"]).numel() == 1
+    assert torch.unique(batch["sampled_noise_family_id"]).numel() == 1
+    assert torch.unique(batch["sampled_student_df"]).numel() == 1
+
+
 def test_filtered_generation_raises_after_bounded_resampling(dynscm_api):
     config_mod, _ = dynscm_api
     from tfmplayground.priors.dynscm import parallel as parallel_mod

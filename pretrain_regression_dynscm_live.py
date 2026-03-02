@@ -254,6 +254,7 @@ def _build_get_batch(
             cfg_override_sampler=_family_sampler(source),
             sample_filter=source.sample_filter,
             max_sample_attempts_per_item=source.max_sample_attempts_per_item,
+            share_system_within_batch=source.share_system_within_batch,
         )
     if source.kind == "mode_ladder":
         if source.cfg is None or source.schedule is None:
@@ -274,6 +275,7 @@ def _build_get_batch(
             cfg_override_sampler=mode_sampler,
             sample_filter=source.sample_filter,
             max_sample_attempts_per_item=source.max_sample_attempts_per_item,
+            share_system_within_batch=source.share_system_within_batch,
         )
     if source.kind == "mixture":
         if source.schedule is None:
@@ -299,6 +301,7 @@ def _build_get_batch(
                     ),
                     sample_filter=source.sample_filter,
                     max_sample_attempts_per_item=source.max_sample_attempts_per_item,
+                    share_system_within_batch=source.share_system_within_batch,
                 )
             )
         return MixtureGetBatch(
@@ -391,6 +394,9 @@ def _run_config_payload(
                     else profile.train_source.sample_filter.to_payload()
                 ),
                 "batch_shared_fields": list(profile.train_source.batch_shared_fields),
+                "share_system_within_batch": bool(
+                    profile.train_source.share_system_within_batch
+                ),
                 "max_sample_attempts_per_item": int(
                     profile.train_source.max_sample_attempts_per_item
                 ),
@@ -409,6 +415,9 @@ def _run_config_payload(
                     None
                     if profile.val_source.cfg is None
                     else profile.val_source.cfg.to_dict()
+                ),
+                "share_system_within_batch": bool(
+                    profile.val_source.share_system_within_batch
                 ),
             },
         },

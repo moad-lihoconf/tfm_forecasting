@@ -45,6 +45,7 @@ class DynSCMBatchGenerator:
         ) = None,
         sample_filter: DynSCMSampleFilterConfig | None = None,
         max_sample_attempts_per_item: int = 1,
+        share_system_within_batch: bool = False,
     ) -> None:
         self.cfg = cfg
         self.target_device = torch.device(device)
@@ -60,6 +61,7 @@ class DynSCMBatchGenerator:
         self.cfg_override_sampler = cfg_override_sampler
         self.sample_filter = sample_filter
         self.max_sample_attempts_per_item = int(max_sample_attempts_per_item)
+        self.share_system_within_batch = bool(share_system_within_batch)
         self._executor: ProcessPoolExecutor | None = None
         self._row_pair_cache: dict[int, np.ndarray] = {}
         self._batch_index = 0
@@ -87,6 +89,15 @@ class DynSCMBatchGenerator:
         if self.cfg_override_sampler is not None:
             cfg_overrides = self.cfg_override_sampler(self.state_rng, self._batch_index)
         self._batch_index += 1
+        shared_system_seed: int | None = None
+        if self.share_system_within_batch:
+            shared_system_seed = int(
+                draw_seed_bundles(
+                    self.state_rng,
+                    batch_size=1,
+                    bundle_width=1,
+                )[0, 0]
+            )
 
         sample_seeds = draw_seed_bundles(
             self.state_rng,
@@ -113,6 +124,7 @@ class DynSCMBatchGenerator:
                     cfg_overrides=cfg_overrides,
                     sample_filter=self.sample_filter,
                     max_generation_attempts=self.max_sample_attempts_per_item,
+                    shared_system_seed=shared_system_seed,
                 )
                 x_batch[idx] = x_i
                 y_batch[idx] = y_i
@@ -134,6 +146,7 @@ class DynSCMBatchGenerator:
                         else self.sample_filter.to_payload()
                     ),
                     max_generation_attempts=self.max_sample_attempts_per_item,
+                    shared_system_seed=shared_system_seed,
                 )
                 for sample_seed in sample_seeds
             ]
@@ -225,6 +238,7 @@ def make_get_batch_dynscm(
     ) = None,
     sample_filter: DynSCMSampleFilterConfig | None = None,
     max_sample_attempts_per_item: int = 1,
+    share_system_within_batch: bool = False,
 ) -> Callable[[int, int, int], dict[str, torch.Tensor | int]]:
     """Return stateful DynSCM batch generator for `PriorDataLoader`."""
     return DynSCMBatchGenerator(
@@ -236,6 +250,7 @@ def make_get_batch_dynscm(
         cfg_override_sampler=cfg_override_sampler,
         sample_filter=sample_filter,
         max_sample_attempts_per_item=max_sample_attempts_per_item,
+        share_system_within_batch=share_system_within_batch,
     )
 
 
