@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 
@@ -38,6 +39,7 @@ class DynSCMWorkerTask:
     cfg_overrides: dict[str, object] | None = None
     filter_payload: dict[str, object] | None = None
     max_generation_attempts: int = 1
+    generation_exhaustion_policy: Literal["raise", "accept_last"] = "raise"
     shared_system_seed: int | None = None
 
 
@@ -79,6 +81,7 @@ def generate_dynscm_worker_sample(
         cfg_overrides=task.cfg_overrides,
         sample_filter=DynSCMSampleFilterConfig.from_payload(task.filter_payload),
         max_generation_attempts=task.max_generation_attempts,
+        generation_exhaustion_policy=task.generation_exhaustion_policy,
         shared_system_seed=task.shared_system_seed,
     )
 
@@ -166,11 +169,16 @@ def build_single_dynscm_sample(
     cfg_overrides: Mapping[str, object] | None = None,
     sample_filter: DynSCMSampleFilterConfig | None = None,
     max_generation_attempts: int = 1,
+    generation_exhaustion_policy: Literal["raise", "accept_last"] = "raise",
     shared_system_seed: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, int | float | str]]:
     """Generate exactly one padded DynSCM `(x_i, y_i)` sample."""
     if max_generation_attempts < 1:
         raise ValueError("max_generation_attempts must be >= 1.")
+    if generation_exhaustion_policy not in {"raise", "accept_last"}:
+        raise ValueError(
+            "generation_exhaustion_policy must be one of 'raise' or 'accept_last'."
+        )
     base_cfg = cfg.with_overrides(**dict(cfg_overrides)) if cfg_overrides else cfg
     last_sample: tuple[np.ndarray, np.ndarray, dict[str, int | float | str]] | None = (
         None
@@ -234,7 +242,11 @@ def build_single_dynscm_sample(
         reject_counts["missing_fraction_high"]
         + reject_counts["block_missing_fraction_high"]
     )
+    metadata["sampled_filter_fallback_accept"] = 0
     if sample_filter is not None and not bool(metadata.get("sampled_filter_accept", 0)):
+        if generation_exhaustion_policy == "accept_last":
+            metadata["sampled_filter_fallback_accept"] = 1
+            return last_sample
         raise RuntimeError(
             "DynSCM sample rejected after exhausting generation attempts: "
             f"attempts={attempt_count}, "
@@ -243,7 +255,8 @@ def build_single_dynscm_sample(
             f"probe_r2_train={metadata.get('sampled_probe_r2_train')}, "
             f"probe_r2_holdout={metadata.get('sampled_probe_r2_holdout')}, "
             f"target_self_lag_weight={metadata.get('sampled_target_self_lag_weight')}, "
-            f"reject_counts={reject_counts}."
+            f"reject_counts={reject_counts}, "
+            f"generation_exhaustion_policy={generation_exhaustion_policy!r}."
         )
     return last_sample
 
@@ -485,6 +498,7 @@ def _build_single_dynscm_sample_once(
             )
         ),
         "sampled_filter_accept": 1,
+        "sampled_filter_fallback_accept": 0,
     }
     if shared_system_seed is not None:
         sample_metadata["sampled_shared_system_seed"] = int(shared_system_seed)

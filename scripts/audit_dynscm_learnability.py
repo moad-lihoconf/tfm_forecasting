@@ -119,6 +119,7 @@ def main(argv: list[str] | None = None) -> None:
     clipped_reject: list[float] = []
     informative_feature_reject: list[float] = []
     missing_reject: list[float] = []
+    filter_fallback_accept: list[float] = []
     attempts_used: list[float] = []
     processed_batches = 0
 
@@ -299,6 +300,16 @@ def main(argv: list[str] | None = None) -> None:
                 .astype(np.float64)
                 .tolist()
             )
+            fallback_tensor = batch.get("sampled_filter_fallback_accept")
+            if torch.is_tensor(fallback_tensor):
+                filter_fallback_accept.extend(
+                    cast(torch.Tensor, fallback_tensor)
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .astype(np.float64)
+                    .tolist()
+                )
             attempts_used.extend(
                 _tensor(batch, "sampled_generation_attempts_used")
                 .detach()
@@ -357,7 +368,15 @@ def main(argv: list[str] | None = None) -> None:
             "informative_feature_fraction": float(sum(informative_feature_reject))
             / total_attempts,
             "missing_fraction": float(sum(missing_reject)) / total_attempts,
+            "fallback_accept_fraction": (
+                float(np.mean(filter_fallback_accept))
+                if filter_fallback_accept
+                else 0.0
+            ),
         },
+        "fallback_accept_fraction": (
+            float(np.mean(filter_fallback_accept)) if filter_fallback_accept else 0.0
+        ),
     }
 
     print(

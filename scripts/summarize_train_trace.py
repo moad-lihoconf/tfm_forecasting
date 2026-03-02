@@ -64,13 +64,19 @@ def build_summary(payload: dict[str, Any]) -> dict[str, Any]:
 
     grad_before = scalar_values("grad_norm_before_clip")
     grad_after = scalar_values("grad_norm_after_clip")
+    metadata = payload.get("metadata", {})
+    grad_clip_norm = 1.0
+    if isinstance(metadata, dict):
+        raw_clip_norm = metadata.get("grad_clip_norm")
+        if isinstance(raw_clip_norm, int | float):
+            grad_clip_norm = float(raw_clip_norm)
     clipped_records = 0
     for record in active_records:
         before = record.get("grad_norm_before_clip")
         after = record.get("grad_norm_after_clip")
         if not isinstance(before, int | float) or not isinstance(after, int | float):
             continue
-        if float(before) > 1.0 and float(after) < float(before):
+        if float(before) > grad_clip_norm and float(after) < float(before):
             clipped_records += 1
 
     summary = {

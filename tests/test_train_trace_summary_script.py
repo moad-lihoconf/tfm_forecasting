@@ -16,15 +16,19 @@ build_summary = _MODULE.build_summary
 
 def test_build_summary_aggregates_trace_records() -> None:
     payload = {
-        "metadata": {"optimizer_name": "adamw", "regression_loss": "mse"},
+        "metadata": {
+            "optimizer_name": "adamw",
+            "regression_loss": "mse",
+            "grad_clip_norm": 0.5,
+        },
         "records": [
             {
                 "skipped": False,
                 "loss": 1.0,
                 "valid_supervised_targets": 8,
                 "filtered_low_std_functions": 1,
-                "grad_norm_before_clip": 2.0,
-                "grad_norm_after_clip": 1.0,
+                "grad_norm_before_clip": 0.8,
+                "grad_norm_after_clip": 0.2,
                 "decoder_linear2_weight_update_norm": 0.1,
                 "decoder_linear2_weight_norm": 2.5,
                 "decoder_linear2_bias_norm": 0.4,
@@ -37,8 +41,8 @@ def test_build_summary_aggregates_trace_records() -> None:
                 "loss": 3.0,
                 "valid_supervised_targets": 16,
                 "filtered_low_std_functions": 0,
-                "grad_norm_before_clip": 0.5,
-                "grad_norm_after_clip": 0.5,
+                "grad_norm_before_clip": 0.4,
+                "grad_norm_after_clip": 0.4,
                 "decoder_linear2_weight_update_norm": 0.2,
                 "decoder_linear2_weight_norm": 2.0,
                 "decoder_linear2_bias_norm": 0.3,

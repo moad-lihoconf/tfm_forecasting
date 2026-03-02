@@ -163,6 +163,85 @@ def test_pretrain_regression_dynscm_live_writes_artifacts(
     assert cast(live_train.PriorDataLoader, captured["val_prior"]).num_steps == 64
     assert captured["grad_clip_norm"] == 5.0
     assert captured["ckpt"] is None
+    run_config = json.loads(run_config_path.read_text(encoding="utf-8"))
+    assert run_config["resolved_global_seed"] == 2402
+    assert run_config["resolved_train_seed"] == base_profile.train_seed
+    assert run_config["resolved_val_seed"] == base_profile.val_seed
+    assert run_config["sources"]["train"]["generation_exhaustion_policy"] == "raise"
+    assert run_config["sources"]["val"]["generation_exhaustion_policy"] == "raise"
+    assert run_config["sources"]["train"]["shared_system_reuse_batches"] == 1
+    assert run_config["sources"]["val"]["shared_system_reuse_batches"] == 1
+    assert "sample_filter" in run_config["sources"]["val"]
+
+
+def test_pretrain_regression_dynscm_live_seed_overrides_are_persisted(
+    monkeypatch, tmp_path: Path
+) -> None:
+    weights_path = tmp_path / "weights.pth"
+    buckets_path = tmp_path / "buckets.pth"
+    run_config_path = tmp_path / "run_config.json"
+
+    monkeypatch.setattr(live_train, "get_default_device", lambda: torch.device("cpu"))
+    monkeypatch.setattr(
+        live_train.NanoTabPFNModel,
+        "load_state_dict",
+        lambda self, state_dict, strict=True: None,
+    )
+    seed_capture: dict[str, int] = {}
+    monkeypatch.setattr(
+        live_train,
+        "set_randomness_seed",
+        lambda seed: seed_capture.setdefault("global_seed", int(seed)),
+    )
+
+    def _fake_train(**kwargs):
+        run_dir = Path("workdir/live-seed-overrides")
+        run_dir.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {"architecture": {}, "model": kwargs["model"].state_dict()},
+            run_dir / "best_checkpoint.pth",
+        )
+        torch.save(
+            {"model": kwargs["model"].state_dict()},
+            run_dir / "latest_checkpoint.pth",
+        )
+        return kwargs["model"], {
+            "best_epoch": 1,
+            "best_metric": 0.1,
+            "stop_reason": "completed",
+        }
+
+    monkeypatch.setattr(live_train, "train", _fake_train)
+
+    live_train.main(
+        [
+            "--research_profile",
+            "medium32k_live_baseline",
+            "--no-warm_start",
+            "--saveweights",
+            str(weights_path),
+            "--savebuckets",
+            str(buckets_path),
+            "--run_config_json",
+            str(run_config_path),
+            "--global_seed",
+            "9101",
+            "--train_seed",
+            "9102",
+            "--val_seed",
+            "9103",
+            "--dynscm_workers",
+            "1",
+            "--runname",
+            "live-seed-overrides",
+        ]
+    )
+
+    run_config = json.loads(run_config_path.read_text(encoding="utf-8"))
+    assert seed_capture["global_seed"] == 9101
+    assert run_config["resolved_global_seed"] == 9101
+    assert run_config["resolved_train_seed"] == 9102
+    assert run_config["resolved_val_seed"] == 9103
 
 
 def test_pretrain_regression_dynscm_live_warm_start_resets_training_state(
@@ -341,7 +420,7 @@ def test_pretrain_regression_dynscm_live_defaults_to_profile_warm_start(
     assert captured["ckpt"] is None
 
 
-def test_pretrain_regression_dynscm_live_uses_profile_target_std_floor_and_allows_warm_start_norm_mismatch(
+def test_pretrain_live_uses_profile_target_std_floor_with_warm_start_norm_mismatch(
     monkeypatch, tmp_path: Path
 ) -> None:
     checkpoint_path = tmp_path / "norm_mismatch_checkpoint.pth"

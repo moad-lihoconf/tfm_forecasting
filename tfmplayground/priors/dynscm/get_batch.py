@@ -6,6 +6,7 @@ import contextlib
 import multiprocessing as mp
 from collections.abc import Callable, Mapping
 from concurrent.futures import ProcessPoolExecutor
+from typing import Literal
 
 import numpy as np
 import torch
@@ -45,7 +46,9 @@ class DynSCMBatchGenerator:
         ) = None,
         sample_filter: DynSCMSampleFilterConfig | None = None,
         max_sample_attempts_per_item: int = 1,
+        generation_exhaustion_policy: Literal["raise", "accept_last"] = "raise",
         share_system_within_batch: bool = False,
+        shared_system_reuse_batches: int = 1,
     ) -> None:
         self.cfg = cfg
         self.target_device = torch.device(device)
@@ -56,15 +59,26 @@ class DynSCMBatchGenerator:
             raise ValueError("worker_blas_threads must be >= 1.")
         if max_sample_attempts_per_item < 1:
             raise ValueError("max_sample_attempts_per_item must be >= 1.")
+        if shared_system_reuse_batches < 1:
+            raise ValueError("shared_system_reuse_batches must be >= 1.")
+        if generation_exhaustion_policy not in {"raise", "accept_last"}:
+            raise ValueError(
+                "generation_exhaustion_policy must be one of 'raise' or 'accept_last'."
+            )
         self.workers = int(workers)
         self.worker_blas_threads = int(worker_blas_threads)
         self.cfg_override_sampler = cfg_override_sampler
         self.sample_filter = sample_filter
         self.max_sample_attempts_per_item = int(max_sample_attempts_per_item)
+        self.generation_exhaustion_policy = generation_exhaustion_policy
         self.share_system_within_batch = bool(share_system_within_batch)
+        self.shared_system_reuse_batches = int(shared_system_reuse_batches)
         self._executor: ProcessPoolExecutor | None = None
         self._row_pair_cache: dict[int, np.ndarray] = {}
         self._batch_index = 0
+        self._shared_system_seed: int | None = None
+        self._shared_system_batches_used = 0
+        self._shared_system_block_index = -1
 
     def __call__(
         self,
@@ -90,14 +104,24 @@ class DynSCMBatchGenerator:
             cfg_overrides = self.cfg_override_sampler(self.state_rng, self._batch_index)
         self._batch_index += 1
         shared_system_seed: int | None = None
+        shared_system_block_index: int | None = None
         if self.share_system_within_batch:
-            shared_system_seed = int(
-                draw_seed_bundles(
-                    self.state_rng,
-                    batch_size=1,
-                    bundle_width=1,
-                )[0, 0]
-            )
+            if (
+                self._shared_system_seed is None
+                or self._shared_system_batches_used >= self.shared_system_reuse_batches
+            ):
+                self._shared_system_seed = int(
+                    draw_seed_bundles(
+                        self.state_rng,
+                        batch_size=1,
+                        bundle_width=1,
+                    )[0, 0]
+                )
+                self._shared_system_batches_used = 0
+                self._shared_system_block_index += 1
+            self._shared_system_batches_used += 1
+            shared_system_seed = self._shared_system_seed
+            shared_system_block_index = self._shared_system_block_index
 
         sample_seeds = draw_seed_bundles(
             self.state_rng,
@@ -124,8 +148,13 @@ class DynSCMBatchGenerator:
                     cfg_overrides=cfg_overrides,
                     sample_filter=self.sample_filter,
                     max_generation_attempts=self.max_sample_attempts_per_item,
+                    generation_exhaustion_policy=self.generation_exhaustion_policy,
                     shared_system_seed=shared_system_seed,
                 )
+                if shared_system_block_index is not None:
+                    metadata_i["sampled_shared_system_block_index"] = int(
+                        shared_system_block_index
+                    )
                 x_batch[idx] = x_i
                 y_batch[idx] = y_i
                 _accumulate_numeric_metadata(sample_metadata, metadata_i)
@@ -146,6 +175,7 @@ class DynSCMBatchGenerator:
                         else self.sample_filter.to_payload()
                     ),
                     max_generation_attempts=self.max_sample_attempts_per_item,
+                    generation_exhaustion_policy=self.generation_exhaustion_policy,
                     shared_system_seed=shared_system_seed,
                 )
                 for sample_seed in sample_seeds
@@ -158,6 +188,10 @@ class DynSCMBatchGenerator:
                         chunksize=1,
                     )
                 ):
+                    if shared_system_block_index is not None:
+                        metadata_i["sampled_shared_system_block_index"] = int(
+                            shared_system_block_index
+                        )
                     x_batch[idx] = x_i
                     y_batch[idx] = y_i
                     _accumulate_numeric_metadata(sample_metadata, metadata_i)
@@ -238,7 +272,9 @@ def make_get_batch_dynscm(
     ) = None,
     sample_filter: DynSCMSampleFilterConfig | None = None,
     max_sample_attempts_per_item: int = 1,
+    generation_exhaustion_policy: Literal["raise", "accept_last"] = "raise",
     share_system_within_batch: bool = False,
+    shared_system_reuse_batches: int = 1,
 ) -> Callable[[int, int, int], dict[str, torch.Tensor | int]]:
     """Return stateful DynSCM batch generator for `PriorDataLoader`."""
     return DynSCMBatchGenerator(
@@ -250,7 +286,9 @@ def make_get_batch_dynscm(
         cfg_override_sampler=cfg_override_sampler,
         sample_filter=sample_filter,
         max_sample_attempts_per_item=max_sample_attempts_per_item,
+        generation_exhaustion_policy=generation_exhaustion_policy,
         share_system_within_batch=share_system_within_batch,
+        shared_system_reuse_batches=shared_system_reuse_batches,
     )
 
 

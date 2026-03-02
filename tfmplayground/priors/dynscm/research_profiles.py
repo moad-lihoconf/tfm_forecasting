@@ -107,8 +107,10 @@ class LiveSourceSpec:
     cfg: DynSCMConfig | None
     sample_filter: DynSCMSampleFilterConfig | None = None
     max_sample_attempts_per_item: int = 1
+    generation_exhaustion_policy: Literal["raise", "accept_last"] = "raise"
     batch_shared_fields: tuple[str, ...] = ()
     share_system_within_batch: bool = False
+    shared_system_reuse_batches: int = 1
     modes: tuple[DynSCMBatchMode, ...] = ()
     schedule: LinearPhaseSchedule | None = None
     child_sources: tuple[tuple[str, DynSCMConfig], ...] = ()
@@ -577,16 +579,20 @@ def _single_source(
     *,
     batch_shared_fields: tuple[str, ...] = (),
     share_system_within_batch: bool = False,
+    shared_system_reuse_batches: int = 1,
     sample_filter: DynSCMSampleFilterConfig | None = None,
     max_sample_attempts_per_item: int = 1,
+    generation_exhaustion_policy: Literal["raise", "accept_last"] = "raise",
 ) -> LiveSourceSpec:
     return LiveSourceSpec(
         kind="single",
         cfg=cfg,
         sample_filter=sample_filter,
         max_sample_attempts_per_item=max_sample_attempts_per_item,
+        generation_exhaustion_policy=generation_exhaustion_policy,
         batch_shared_fields=batch_shared_fields,
         share_system_within_batch=share_system_within_batch,
+        shared_system_reuse_batches=shared_system_reuse_batches,
     )
 
 
@@ -983,6 +989,30 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
             share_system_within_batch=False,
         ),
     )
+    integration_easy_stable_batch_safe_eval = replace(
+        integration_easy_stable_batch,
+        name="integration_contract_easy_stable_batch_safe_eval",
+        val_source=_single_source(
+            benchmark_contract_observed_easy_cfg(),
+            sample_filter=_learnability_filter(
+                min_informative_feature_count=8,
+                min_probe_train_r2=0.15,
+                max_probe_train_r2=0.995,
+            ),
+            max_sample_attempts_per_item=GUARDRAIL_MAX_SAMPLE_ATTEMPTS,
+            share_system_within_batch=False,
+            generation_exhaustion_policy="accept_last",
+        ),
+    )
+    integration_easy_stable_batch_k4_safe_eval = replace(
+        integration_easy_stable_batch_safe_eval,
+        name="integration_contract_easy_stable_batch_k4_safe_eval",
+        train_source=replace(
+            integration_easy_stable_batch_safe_eval.train_source,
+            share_system_within_batch=True,
+            shared_system_reuse_batches=4,
+        ),
+    )
     integration_temporal = replace(
         mode_ladder,
         name="integration_contract_temporal",
@@ -1016,6 +1046,8 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
             norm_clamped,
             integration_easy,
             integration_easy_stable_batch,
+            integration_easy_stable_batch_safe_eval,
+            integration_easy_stable_batch_k4_safe_eval,
             integration_temporal,
         )
     }

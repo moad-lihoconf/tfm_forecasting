@@ -23,6 +23,8 @@ def test_research_profiles_define_expected_names(priors_modules) -> None:
         "mode_ladder_norm_clamped",
         "integration_contract_easy",
         "integration_contract_easy_stable_batch",
+        "integration_contract_easy_stable_batch_safe_eval",
+        "integration_contract_easy_stable_batch_k4_safe_eval",
         "integration_contract_temporal",
     )
 
@@ -308,12 +310,52 @@ def test_integration_contract_easy_stable_batch_shares_latent_system_within_batc
 
     assert profile.train_source.share_system_within_batch is True
     assert profile.val_source.share_system_within_batch is False
+    assert profile.train_source.shared_system_reuse_batches == 1
+    assert profile.val_source.shared_system_reuse_batches == 1
+    assert profile.train_source.generation_exhaustion_policy == "raise"
+    assert profile.val_source.generation_exhaustion_policy == "raise"
     assert profile.train_source.sample_filter is not None
     assert profile.val_source.sample_filter is not None
     assert profile.train_source.sample_filter.min_probe_train_r2 == 0.15
     assert profile.val_source.sample_filter.min_probe_train_r2 == 0.15
     assert profile.train_source.sample_filter.max_probe_train_r2 == 0.99
     assert profile.val_source.sample_filter.max_probe_train_r2 == 0.99
+
+
+def test_integration_contract_easy_stable_batch_safe_eval_relaxes_val_and_soft_fails(
+    priors_modules,
+) -> None:
+    profiles_mod = priors_modules["research_profiles"]
+    profile = profiles_mod.get_research_profile(
+        "integration_contract_easy_stable_batch_safe_eval"
+    )
+
+    assert profile.train_source.generation_exhaustion_policy == "raise"
+    assert profile.val_source.generation_exhaustion_policy == "accept_last"
+    assert profile.train_source.sample_filter is not None
+    assert profile.val_source.sample_filter is not None
+    assert profile.train_source.sample_filter.max_probe_train_r2 == 0.99
+    assert profile.val_source.sample_filter.max_probe_train_r2 == 0.995
+    assert profile.train_source.share_system_within_batch is True
+    assert profile.val_source.share_system_within_batch is False
+    assert profile.train_source.shared_system_reuse_batches == 1
+    assert profile.val_source.shared_system_reuse_batches == 1
+
+
+def test_integration_contract_easy_stable_batch_k4_safe_eval_reuses_system_k_batches(
+    priors_modules,
+) -> None:
+    profiles_mod = priors_modules["research_profiles"]
+    profile = profiles_mod.get_research_profile(
+        "integration_contract_easy_stable_batch_k4_safe_eval"
+    )
+
+    assert profile.train_source.share_system_within_batch is True
+    assert profile.train_source.shared_system_reuse_batches == 4
+    assert profile.train_source.generation_exhaustion_policy == "raise"
+    assert profile.val_source.generation_exhaustion_policy == "accept_last"
+    assert profile.val_source.share_system_within_batch is False
+    assert profile.val_source.shared_system_reuse_batches == 1
 
 
 def test_normalization_ablation_profiles_only_change_target_normalization(

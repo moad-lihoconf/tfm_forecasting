@@ -53,6 +53,7 @@ class ResolvedBudget(TypedDict):
     early_stopping_metric: str
     early_stopping_patience: int
     early_stopping_min_delta: float
+    early_stopping_smoothing_window: int
     loss_weighting: Literal["per_target", "per_function"]
     grad_clip_norm: float
     debug_trace_first_n_batches: int
@@ -99,6 +100,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--global_seed", type=int, default=None)
+    parser.add_argument("--train_seed", type=int, default=None)
+    parser.add_argument("--val_seed", type=int, default=None)
     parser.add_argument("--loadcheckpoint", type=str, default=None)
     parser.add_argument(
         "--warm_start",
@@ -120,6 +124,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--early_stopping_patience", type=int, default=None)
     parser.add_argument("--early_stopping_min_delta", type=float, default=None)
+    parser.add_argument("--early_stopping_smoothing_window", type=int, default=1)
     parser.add_argument("--eval_every_epochs", type=int, default=None)
     parser.add_argument("--val_steps", type=int, default=None)
     parser.add_argument("--max_train_hours", type=float, default=None)
@@ -254,7 +259,9 @@ def _build_get_batch(
             cfg_override_sampler=_family_sampler(source),
             sample_filter=source.sample_filter,
             max_sample_attempts_per_item=source.max_sample_attempts_per_item,
+            generation_exhaustion_policy=source.generation_exhaustion_policy,
             share_system_within_batch=source.share_system_within_batch,
+            shared_system_reuse_batches=source.shared_system_reuse_batches,
         )
     if source.kind == "mode_ladder":
         if source.cfg is None or source.schedule is None:
@@ -275,7 +282,9 @@ def _build_get_batch(
             cfg_override_sampler=mode_sampler,
             sample_filter=source.sample_filter,
             max_sample_attempts_per_item=source.max_sample_attempts_per_item,
+            generation_exhaustion_policy=source.generation_exhaustion_policy,
             share_system_within_batch=source.share_system_within_batch,
+            shared_system_reuse_batches=source.shared_system_reuse_batches,
         )
     if source.kind == "mixture":
         if source.schedule is None:
@@ -301,7 +310,9 @@ def _build_get_batch(
                     ),
                     sample_filter=source.sample_filter,
                     max_sample_attempts_per_item=source.max_sample_attempts_per_item,
+                    generation_exhaustion_policy=source.generation_exhaustion_policy,
                     share_system_within_batch=source.share_system_within_batch,
+                    shared_system_reuse_batches=source.shared_system_reuse_batches,
                 )
             )
         return MixtureGetBatch(
@@ -349,6 +360,9 @@ def _run_config_payload(
     args: argparse.Namespace,
     profile: DynSCMLiveResearchProfile,
     resolved_budget: ResolvedBudget,
+    resolved_global_seed: int,
+    resolved_train_seed: int,
+    resolved_val_seed: int,
     loadcheckpoint: str | None,
     warm_start: bool,
     resolved_target_normalization: str,
@@ -360,8 +374,13 @@ def _run_config_payload(
         "warm_start_checkpoint": profile.warm_start_checkpoint,
         "effective_loadcheckpoint": loadcheckpoint,
         "effective_warm_start": bool(warm_start),
-        "train_seed": int(profile.train_seed),
-        "val_seed": int(profile.val_seed),
+        "profile_train_seed": int(profile.train_seed),
+        "profile_val_seed": int(profile.val_seed),
+        "resolved_global_seed": int(resolved_global_seed),
+        "resolved_train_seed": int(resolved_train_seed),
+        "resolved_val_seed": int(resolved_val_seed),
+        "train_seed": int(resolved_train_seed),
+        "val_seed": int(resolved_val_seed),
         "max_seq_len": int(profile.max_seq_len),
         "max_features": int(profile.max_features),
         "training_budget": resolved_budget,
@@ -379,6 +398,9 @@ def _run_config_payload(
             "dynscm_worker_blas_threads": int(args.dynscm_worker_blas_threads),
             "warm_start": bool(warm_start),
             "promote_to_full": bool(args.promote_to_full),
+            "global_seed": args.global_seed,
+            "train_seed": args.train_seed,
+            "val_seed": args.val_seed,
         },
         "sources": {
             "train": {
@@ -397,8 +419,14 @@ def _run_config_payload(
                 "share_system_within_batch": bool(
                     profile.train_source.share_system_within_batch
                 ),
+                "shared_system_reuse_batches": int(
+                    profile.train_source.shared_system_reuse_batches
+                ),
                 "max_sample_attempts_per_item": int(
                     profile.train_source.max_sample_attempts_per_item
+                ),
+                "generation_exhaustion_policy": str(
+                    profile.train_source.generation_exhaustion_policy
                 ),
                 "modes": [
                     {"name": mode.name, "cfg_overrides": dict(mode.cfg_overrides)}
@@ -416,8 +444,22 @@ def _run_config_payload(
                     if profile.val_source.cfg is None
                     else profile.val_source.cfg.to_dict()
                 ),
+                "sample_filter": (
+                    None
+                    if profile.val_source.sample_filter is None
+                    else profile.val_source.sample_filter.to_payload()
+                ),
                 "share_system_within_batch": bool(
                     profile.val_source.share_system_within_batch
+                ),
+                "shared_system_reuse_batches": int(
+                    profile.val_source.shared_system_reuse_batches
+                ),
+                "max_sample_attempts_per_item": int(
+                    profile.val_source.max_sample_attempts_per_item
+                ),
+                "generation_exhaustion_policy": str(
+                    profile.val_source.generation_exhaustion_policy
                 ),
             },
         },
@@ -432,11 +474,20 @@ def main(argv: list[str] | None = None) -> None:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    set_randomness_seed(2402)
+    resolved_global_seed = (
+        int(args.global_seed) if args.global_seed is not None else 2402
+    )
+    set_randomness_seed(resolved_global_seed)
     profile = (
         build_promotion_profile(args.research_profile)
         if args.promote_to_full
         else get_research_profile(args.research_profile)
+    )
+    resolved_train_seed = (
+        int(args.train_seed) if args.train_seed is not None else int(profile.train_seed)
+    )
+    resolved_val_seed = (
+        int(args.val_seed) if args.val_seed is not None else int(profile.val_seed)
     )
     budget = profile.training_budget
     resolved_target_normalization = (
@@ -484,6 +535,9 @@ def main(argv: list[str] | None = None) -> None:
                 budget.early_stopping_min_delta,
             )
         ),
+        "early_stopping_smoothing_window": _as_int(
+            _budget_value(args.early_stopping_smoothing_window, 1)
+        ),
         "loss_weighting": cast(
             Literal["per_target", "per_function"],
             _as_str(_budget_value(args.loss_weighting, budget.loss_weighting)),
@@ -526,6 +580,8 @@ def main(argv: list[str] | None = None) -> None:
         raise ValueError("--huber_delta must be > 0.")
     if resolved_target_std_floor <= 0.0:
         raise ValueError("--target_std_floor must be > 0.")
+    if resolved_budget["early_stopping_smoothing_window"] < 1:
+        raise ValueError("--early_stopping_smoothing_window must be >= 1.")
     if args.min_train_target_std < 0.0:
         raise ValueError("--min_train_target_std must be >= 0.")
     if resolved_budget["grad_clip_norm"] <= 0.0:
@@ -644,7 +700,7 @@ def main(argv: list[str] | None = None) -> None:
             num_datapoints_max=profile.max_seq_len,
             num_features=profile.max_features,
             device=device,
-            seed=profile.train_seed,
+            seed=resolved_train_seed,
             workers=args.dynscm_workers,
             worker_blas_threads=args.dynscm_worker_blas_threads,
             total_train_batches=total_train_batches,
@@ -656,7 +712,7 @@ def main(argv: list[str] | None = None) -> None:
             num_datapoints_max=profile.max_seq_len,
             num_features=profile.max_features,
             device=device,
-            seed=profile.val_seed,
+            seed=resolved_val_seed,
             workers=args.dynscm_workers,
             worker_blas_threads=args.dynscm_worker_blas_threads,
             total_train_batches=max(1, resolved_budget["val_steps"]),
@@ -739,6 +795,7 @@ def main(argv: list[str] | None = None) -> None:
                 "metric": resolved_budget["early_stopping_metric"],
                 "patience": resolved_budget["early_stopping_patience"],
                 "min_delta": resolved_budget["early_stopping_min_delta"],
+                "smoothing_window": resolved_budget["early_stopping_smoothing_window"],
                 "min_epochs_before_stop": min_epochs_before_stop,
             },
             weight_decay=resolved_budget["weight_decay"],
@@ -787,6 +844,9 @@ def main(argv: list[str] | None = None) -> None:
                         args=args,
                         profile=profile,
                         resolved_budget=resolved_budget,
+                        resolved_global_seed=resolved_global_seed,
+                        resolved_train_seed=resolved_train_seed,
+                        resolved_val_seed=resolved_val_seed,
                         loadcheckpoint=effective_loadcheckpoint,
                         warm_start=effective_warm_start,
                         resolved_target_normalization=resolved_target_normalization,
@@ -807,6 +867,9 @@ def main(argv: list[str] | None = None) -> None:
         train_info["research_profile"] = profile.name
         train_info["warm_start"] = bool(effective_warm_start)
         train_info["loadcheckpoint"] = effective_loadcheckpoint
+        train_info["global_seed"] = int(resolved_global_seed)
+        train_info["train_seed"] = int(resolved_train_seed)
+        train_info["val_seed"] = int(resolved_val_seed)
 
         trained_model = trained_model.to("cpu")
         checkpoint_payload = {
@@ -838,6 +901,9 @@ def main(argv: list[str] | None = None) -> None:
                 args=args,
                 profile=profile,
                 resolved_budget=resolved_budget,
+                resolved_global_seed=resolved_global_seed,
+                resolved_train_seed=resolved_train_seed,
+                resolved_val_seed=resolved_val_seed,
                 loadcheckpoint=effective_loadcheckpoint,
                 warm_start=effective_warm_start,
                 resolved_target_normalization=resolved_target_normalization,

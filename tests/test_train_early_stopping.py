@@ -144,6 +144,36 @@ def test_improvement_updates_best_checkpoint(monkeypatch):
     assert best_ckpt["best_epoch"] == 2
 
 
+def test_early_stopping_smoothing_uses_rolling_metric(monkeypatch):
+    values = iter([1.0, 1.2, 0.8, 0.9])
+    monkeypatch.setattr(
+        train_mod, "_evaluate_prior_loss", lambda **kwargs: next(values)
+    )
+
+    run_name = "test_early_stopping_smoothing_uses_rolling_metric"
+    _, info = train_mod.train(
+        model=_model(),
+        prior=_FixedPrior(num_steps=1),
+        val_prior=_FixedPrior(num_steps=1),
+        criterion=nn.CrossEntropyLoss(),
+        epochs=4,
+        lr=1e-3,
+        run_name=run_name,
+        early_stopping={
+            "metric": "val_loss",
+            "patience": 10,
+            "min_delta": 1e-4,
+            "smoothing_window": 2,
+        },
+    )
+
+    latest_ckpt = torch.load(Path("workdir") / run_name / "latest_checkpoint.pth")
+    assert info["best_epoch"] == 4
+    assert abs(float(info["best_metric"]) - 0.85) < 1e-9
+    assert latest_ckpt["early_stopping_state"]["smoothing_window"] == 2
+    assert latest_ckpt["early_stopping_state"]["metric_history"] == [0.8, 0.9]
+
+
 def test_resume_restores_early_stopping_state(monkeypatch):
     values_a = iter([1.0, 1.0])
     monkeypatch.setattr(

@@ -56,6 +56,7 @@ _RICHNESS_METADATA_KEYS = {
     "sampled_informative_feature_reject_count",
     "sampled_missing_reject_count",
     "sampled_filter_accept",
+    "sampled_filter_fallback_accept",
 }
 
 
@@ -429,6 +430,44 @@ def test_share_system_within_batch_pins_latent_system_structure(dynscm_api):
     assert torch.unique(batch["sampled_mechanism_type_id"]).numel() == 1
     assert torch.unique(batch["sampled_noise_family_id"]).numel() == 1
     assert torch.unique(batch["sampled_student_df"]).numel() == 1
+    assert torch.unique(batch["sampled_shared_system_block_index"]).numel() == 1
+
+
+def test_share_system_within_batch_reuses_seed_blocks_for_k_batches(dynscm_api):
+    config_mod, get_batch_mod = dynscm_api
+    cfg = config_mod.DynSCMConfig.from_dict(
+        {
+            "num_variables_min": 3,
+            "num_variables_max": 8,
+            "series_length_min": 96,
+            "series_length_max": 140,
+            "max_lag": 8,
+            "train_rows_min": 8,
+            "train_rows_max": 8,
+            "test_rows_min": 4,
+            "test_rows_max": 4,
+        }
+    )
+    get_batch = get_batch_mod.make_get_batch_dynscm(
+        cfg,
+        device=torch.device("cpu"),
+        seed=72,
+        share_system_within_batch=True,
+        shared_system_reuse_batches=2,
+    )
+    try:
+        batch_1 = get_batch(batch_size=4, num_datapoints_max=16, num_features=24)
+        batch_2 = get_batch(batch_size=4, num_datapoints_max=16, num_features=24)
+        batch_3 = get_batch(batch_size=4, num_datapoints_max=16, num_features=24)
+    finally:
+        _close_if_supported(get_batch)
+
+    assert torch.unique(batch_1["sampled_shared_system_seed"]).numel() == 1
+    assert torch.unique(batch_2["sampled_shared_system_seed"]).numel() == 1
+    assert torch.unique(batch_3["sampled_shared_system_seed"]).numel() == 1
+    assert torch.unique(batch_1["sampled_shared_system_block_index"]).item() == 0
+    assert torch.unique(batch_2["sampled_shared_system_block_index"]).item() == 0
+    assert torch.unique(batch_3["sampled_shared_system_block_index"]).item() == 1
 
 
 def test_filtered_generation_raises_after_bounded_resampling(dynscm_api):
@@ -465,6 +504,46 @@ def test_filtered_generation_raises_after_bounded_resampling(dynscm_api):
             sample_filter=sample_filter,
             max_generation_attempts=2,
         )
+
+
+def test_filtered_generation_accept_last_returns_last_rejected_sample(dynscm_api):
+    config_mod, _ = dynscm_api
+    from tfmplayground.priors.dynscm import parallel as parallel_mod
+    from tfmplayground.priors.dynscm.research import DynSCMSampleFilterConfig
+
+    cfg = config_mod.DynSCMConfig.from_dict(
+        {
+            "num_variables_min": 3,
+            "num_variables_max": 4,
+            "series_length_min": 96,
+            "series_length_max": 120,
+            "max_lag": 6,
+            "train_rows_min": 8,
+            "train_rows_max": 8,
+            "test_rows_min": 4,
+            "test_rows_max": 4,
+            "learnability_probe": True,
+        }
+    )
+    sample_filter = DynSCMSampleFilterConfig(min_train_target_std=1e9)
+
+    x, y, metadata = parallel_mod.build_single_dynscm_sample(
+        cfg,
+        sample_seed=79,
+        n_train=8,
+        n_test=4,
+        row_budget=16,
+        num_features=24,
+        sample_filter=sample_filter,
+        max_generation_attempts=2,
+        generation_exhaustion_policy="accept_last",
+    )
+
+    assert x.shape == (16, 24)
+    assert y.shape == (16,)
+    assert metadata["sampled_filter_accept"] == 0
+    assert metadata["sampled_filter_fallback_accept"] == 1
+    assert metadata["sampled_generation_attempts_used"] == 2
 
 
 def test_probe_metrics_expose_train_and_holdout_scores() -> None:
@@ -572,7 +651,9 @@ def test_generation_runtime_errors_are_retried(monkeypatch, dynscm_api):
         n_test,
         row_budget,
         num_features,
+        shared_system_seed=None,
     ):
+        del shared_system_seed
         attempts.append(int(sample_seed))
         if len(attempts) == 1:
             raise RuntimeError("Spectral radius constraint violated.")

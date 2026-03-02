@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
+import numpy as np
 import schedulefree
 import torch
 from pfns.bar_distribution import FullSupportBarDistribution
@@ -642,10 +643,10 @@ def train(
     best_metric = ckpt.get("best_metric", float("inf")) if ckpt else float("inf")
     best_epoch = ckpt.get("best_epoch", 0) if ckpt else 0
     patience_counter = 0
+    saved_early_stopping_state: dict[str, Any] = {}
     if ckpt:
-        saved_early_stopping_state: dict[str, Any] = cast(
-            dict[str, Any],
-            ckpt.get("early_stopping_state", {}),
+        saved_early_stopping_state = cast(
+            dict[str, Any], ckpt.get("early_stopping_state", {})
         )
         patience_counter = int(saved_early_stopping_state.get("patience_counter", 0))
     es_cfg = dict(early_stopping or {})
@@ -653,9 +654,20 @@ def train(
     min_delta = float(es_cfg.get("min_delta", 1e-4))
     patience = int(es_cfg.get("patience", 10))
     min_epochs_before_stop = int(es_cfg.get("min_epochs_before_stop", 1))
+    smoothing_window = int(es_cfg.get("smoothing_window", 1))
     if min_epochs_before_stop < 1:
         raise ValueError("min_epochs_before_stop must be >= 1.")
+    if smoothing_window < 1:
+        raise ValueError("early_stopping smoothing_window must be >= 1.")
     early_stopping_enabled = bool(es_cfg)
+    metric_history: list[float] = []
+    saved_metric_history = saved_early_stopping_state.get("metric_history", [])
+    if isinstance(saved_metric_history, list):
+        for value in saved_metric_history:
+            if isinstance(value, int | float) and np.isfinite(float(value)):
+                metric_history.append(float(value))
+    if len(metric_history) > smoothing_window:
+        metric_history = metric_history[-smoothing_window:]
     debug_trace_records: list[dict[str, Any]] = []
     global_batch_index = 0
 
@@ -855,13 +867,21 @@ def train(
                 current_metric = metrics[metric_name]
             else:
                 current_metric = float("nan")
+            es_metric = float("nan")
+            if evaluated_this_epoch and np.isfinite(current_metric):
+                metric_history.append(float(current_metric))
+                if len(metric_history) > smoothing_window:
+                    metric_history = metric_history[-smoothing_window:]
+                es_metric = float(np.mean(metric_history))
+            if evaluated_this_epoch:
+                metrics["es_metric"] = float(es_metric)
             improved = (
                 evaluated_this_epoch
-                and not torch.isnan(torch.tensor(current_metric))
-                and (current_metric < (best_metric - min_delta))
+                and np.isfinite(es_metric)
+                and (es_metric < (best_metric - min_delta))
             )
             if improved:
-                best_metric = float(current_metric)
+                best_metric = float(es_metric)
                 best_epoch = epoch
                 patience_counter = 0
             elif evaluated_this_epoch:
@@ -900,7 +920,9 @@ def train(
                     "patience": patience,
                     "min_delta": min_delta,
                     "min_epochs_before_stop": min_epochs_before_stop,
+                    "smoothing_window": smoothing_window,
                     "patience_counter": int(patience_counter),
+                    "metric_history": list(metric_history),
                 },
             }
             torch.save(training_state, work_dir + "/latest_checkpoint.pth")
@@ -918,11 +940,17 @@ def train(
                     f"| val_loss {metrics.get('val_loss', float('nan')):.5f} "
                     f"| val_rmse {val_rmse:.5f} "
                 )
+            es_part = ""
+            if evaluated_this_epoch:
+                es_part = (
+                    f"| es_{metric_name} {metrics.get('es_metric', float('nan')):.5f} "
+                )
 
             print(
                 f"Epoch {epoch:5d} | time {end_time - epoch_start_time:5.2f}s "
                 f"| train_loss {metrics['train_loss']:.5f} "
                 f"{val_part}"
+                f"{es_part}"
                 f"| best_{metric_name} {best_metric:.5f} "
                 f"| patience {patience_counter}/{patience}",
                 flush=True,
@@ -999,5 +1027,6 @@ def train(
         "target_std_floor": float(target_std_floor),
         "min_train_target_std": float(min_train_target_std),
         "grad_clip_norm": float(grad_clip_norm),
+        "early_stopping_smoothing_window": int(smoothing_window),
         "debug_trace_path": debug_trace_path,
     }
