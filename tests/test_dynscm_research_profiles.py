@@ -307,11 +307,13 @@ def test_integration_contract_easy_stable_batch_shares_latent_system_within_batc
     )
 
     assert profile.train_source.share_system_within_batch is True
-    assert profile.val_source.share_system_within_batch is True
+    assert profile.val_source.share_system_within_batch is False
     assert profile.train_source.sample_filter is not None
     assert profile.val_source.sample_filter is not None
     assert profile.train_source.sample_filter.min_probe_train_r2 == 0.15
     assert profile.val_source.sample_filter.min_probe_train_r2 == 0.15
+    assert profile.train_source.sample_filter.max_probe_train_r2 == 0.99
+    assert profile.val_source.sample_filter.max_probe_train_r2 == 0.99
 
 
 def test_normalization_ablation_profiles_only_change_target_normalization(

@@ -965,14 +965,22 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
             benchmark_contract_observed_easy_cfg(),
             batch_shared_fields=COMMON_BATCH_SHARED_FIELDS,
             share_system_within_batch=True,
-            sample_filter=_benchmark_contract_easy_filter(),
+            sample_filter=_learnability_filter(
+                min_informative_feature_count=8,
+                min_probe_train_r2=0.15,
+                max_probe_train_r2=0.99,
+            ),
             max_sample_attempts_per_item=GUARDRAIL_MAX_SAMPLE_ATTEMPTS,
         ),
         val_source=_single_source(
             benchmark_contract_observed_easy_cfg(),
-            sample_filter=_benchmark_contract_easy_filter(),
+            sample_filter=_learnability_filter(
+                min_informative_feature_count=8,
+                min_probe_train_r2=0.15,
+                max_probe_train_r2=0.99,
+            ),
             max_sample_attempts_per_item=GUARDRAIL_MAX_SAMPLE_ATTEMPTS,
-            share_system_within_batch=True,
+            share_system_within_batch=False,
         ),
     )
     integration_temporal = replace(
