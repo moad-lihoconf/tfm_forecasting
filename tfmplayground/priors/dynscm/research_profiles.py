@@ -29,7 +29,7 @@ COMMON_BATCH_SHARED_FIELDS = (
     "missing_mode",
     "kernel_family",
 )
-SHORT_RESEARCH_HORIZONS = (1, 3)
+SHORT_RESEARCH_HORIZONS = (1, 2)
 EARLY_STAGE_SERIES_LENGTH_MIN = 64
 EARLY_STAGE_SERIES_LENGTH_MAX = 128
 EARLY_STAGE_TEMPORAL_SERIES_LENGTH_MIN = 96
@@ -393,12 +393,14 @@ def temporal_full_medium32k_reference_cfg() -> DynSCMConfig:
 def _benchmark_contract_base_cfg() -> DynSCMConfig:
     return _apply_learnability_envelope(
         stable_cfg().with_overrides(
-            num_variables_min=2,
-            num_variables_max=2,
-            train_rows_min=32,
-            train_rows_max=32,
-            test_rows_min=16,
-            test_rows_max=16,
+            num_variables_min=10,
+            num_variables_max=10,
+            train_rows_min=64,
+            train_rows_max=64,
+            test_rows_min=32,
+            test_rows_max=32,
+            series_length_min=128,
+            series_length_max=256,
             forecast_horizons=SHORT_RESEARCH_HORIZONS,
             explicit_lags=(0, 1, 2, 5, 10),
             num_kernels=3,
@@ -445,8 +447,8 @@ def _benchmark_contract_base_cfg() -> DynSCMConfig:
 @lru_cache(maxsize=1)
 def benchmark_contract_observed_easy_cfg() -> DynSCMConfig:
     return _benchmark_contract_base_cfg().with_overrides(
-        series_length_min=EARLY_STAGE_SERIES_LENGTH_MIN,
-        series_length_max=EARLY_STAGE_SERIES_LENGTH_MAX,
+        series_length_min=128,
+        series_length_max=256,
         num_regimes=1,
         sticky_rho=1.0,
         drift_std=0.0,

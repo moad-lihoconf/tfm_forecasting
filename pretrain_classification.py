@@ -1,12 +1,11 @@
 import argparse
 
 import torch
-from sklearn.metrics import accuracy_score, roc_auc_score
+from sklearn.metrics import accuracy_score
 from torch import nn
 
-from tfmplayground.callbacks import ConsoleLoggerCallback, WandbLoggerCallback
+from tfmplayground.callbacks import ConsoleLoggerCallback
 from tfmplayground.evaluation import (
-    TABARENA_TASKS,
     TOY_TASKS_CLASSIFICATION,
     get_openml_predictions,
 )
@@ -125,41 +124,6 @@ class ToyEvaluationLoggerCallback(ConsoleLoggerCallback):
         )
 
 
-class ProductionEvaluationLoggerCallback(WandbLoggerCallback):
-    def __init__(
-        self,
-        project: str,
-        name: str | None = None,
-        config: dict | None = None,
-        log_dir: str | None = None,
-    ):
-        super().__init__(project, name, config, log_dir)
-
-    def on_epoch_end(self, epoch: int, epoch_time: float, loss: float, model, **kwargs):
-        classifier = NanoTabPFNClassifier(model, device)
-        predictions = get_openml_predictions(
-            model=classifier, classification=True, tasks=TABARENA_TASKS
-        )
-        scores = []
-        for _dataset_name, (y_true, _y_pred, y_proba) in predictions.items():
-            scores.append(roc_auc_score(y_true, y_proba, multi_class="ovr"))
-        avg_score = sum(scores) / len(scores)
-        self.wandb.log(
-            {
-                "epoch": epoch,
-                "epoch_time": epoch_time,
-                "mean_loss": loss,
-                "tabarena_avg_roc_auc": avg_score,
-            }
-        )
-        print(
-            f"epoch {epoch:5d} | time {epoch_time:5.2f}s "
-            f"| mean loss {loss:5.2f} | avg roc auc {avg_score:.3f}",
-            flush=True,
-        )
-
-
-# callbacks = [ProductionEvaluationLoggerCallback('nanoTFM', args.runname)]
 callbacks = [ToyEvaluationLoggerCallback(TOY_TASKS_CLASSIFICATION)]
 
 trained_model, _train_info = train(

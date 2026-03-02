@@ -125,18 +125,18 @@ def test_benchmark_contract_profiles_match_benchmark_shape_contract(
 ) -> None:
     profiles_mod = priors_modules["research_profiles"]
     expected_series = {
-        "benchmark_contract_observed_easy": (64, 128),
+        "benchmark_contract_observed_easy": (128, 256),
         "benchmark_contract_observed_temporal": (128, 256),
     }
     for name in expected_series:
         cfg = profiles_mod.get_research_profile(name).train_source.cfg
-        assert cfg.num_variables_min == 2
-        assert cfg.num_variables_max == 2
-        assert cfg.train_rows_min == 32
-        assert cfg.train_rows_max == 32
-        assert cfg.test_rows_min == 16
-        assert cfg.test_rows_max == 16
-        assert cfg.forecast_horizons == (1, 3)
+        assert cfg.num_variables_min == 10
+        assert cfg.num_variables_max == 10
+        assert cfg.train_rows_min == 64
+        assert cfg.train_rows_max == 64
+        assert cfg.test_rows_min == 32
+        assert cfg.test_rows_max == 32
+        assert cfg.forecast_horizons == (1, 2)
         assert cfg.explicit_lags == (0, 1, 2, 5, 10)
         assert cfg.num_kernels == 3
         assert cfg.add_mask_channels is False
@@ -164,9 +164,9 @@ def test_revised_research_profiles_use_only_short_horizons(priors_modules) -> No
     ):
         profile = profiles_mod.get_research_profile(name)
         if profile.train_source.cfg is not None:
-            assert profile.train_source.cfg.forecast_horizons == (1, 3)
+            assert profile.train_source.cfg.forecast_horizons == (1, 2)
         if profile.val_source.cfg is not None:
-            assert profile.val_source.cfg.forecast_horizons == (1, 3)
+            assert profile.val_source.cfg.forecast_horizons == (1, 2)
 
 
 def test_temporal_profiles_use_shorter_common_budget(priors_modules) -> None:
