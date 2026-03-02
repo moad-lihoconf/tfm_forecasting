@@ -25,6 +25,7 @@ def test_research_profiles_define_expected_names(priors_modules) -> None:
         "integration_contract_easy_stable_batch",
         "integration_contract_easy_stable_batch_safe_eval",
         "integration_contract_easy_stable_batch_k4_safe_eval",
+        "integration_contract_temporal_bridge_k4_safe_eval",
         "integration_contract_temporal",
     )
 
@@ -264,6 +265,30 @@ def test_non_baseline_profiles_validate_on_raw_target_cfg(priors_modules) -> Non
     ):
         profile = profiles_mod.get_research_profile(name)
         assert profile.val_source.cfg == target_cfg
+
+
+def test_temporal_bridge_k4_safe_eval_profile_semantics(priors_modules) -> None:
+    profiles_mod = priors_modules["research_profiles"]
+    profile = profiles_mod.get_research_profile(
+        "integration_contract_temporal_bridge_k4_safe_eval"
+    )
+    train_cfg = profile.train_source.cfg
+    val_cfg = profile.val_source.cfg
+
+    assert train_cfg is not None
+    assert val_cfg is not None
+    assert train_cfg.num_regimes == 1
+    assert train_cfg.sticky_rho == 0.97
+    assert train_cfg.drift_std == 0.005
+    assert val_cfg.num_regimes == 1
+    assert val_cfg.sticky_rho == 0.97
+    assert val_cfg.drift_std == 0.005
+    assert profile.max_seq_len == profiles_mod.BENCHMARK_CONTRACT_MAX_SEQ_LEN
+
+    assert profile.train_source.share_system_within_batch is True
+    assert profile.train_source.shared_system_reuse_batches == 4
+    assert profile.val_source.share_system_within_batch is False
+    assert profile.val_source.generation_exhaustion_policy == "accept_last"
 
 
 def test_benchmark_contract_easy_uses_stricter_high_signal_filter(

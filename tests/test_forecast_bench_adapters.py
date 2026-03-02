@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import io
+import json
+import tarfile
 from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
 import pytest
+import requests
 import torch
 
 from tfmplayground.benchmarks.forecasting.adapters import (
@@ -155,6 +159,53 @@ class _CaptureSession:
         return _FakeResponse(self.payload)
 
 
+class _FakeBinaryResponse:
+    def __init__(self, payload: bytes, *, status_code: int = 200, url: str = ""):
+        self.content = payload
+        self.status_code = status_code
+        self.url = url
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"{self.status_code} client error", response=self)
+
+
+class _CaptureTarSession:
+    def __init__(self, payload: bytes):
+        self.payload = payload
+        self.requests = []
+
+    def post(self, url, *args, **kwargs):
+        self.requests.append(kwargs)
+        return _FakeBinaryResponse(self.payload, status_code=200, url=url)
+
+
+def _build_tar_response_payload() -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        meta_bytes = json.dumps({"latency_ms": 12}).encode("utf-8")
+        meta_info = tarfile.TarInfo(name="metadata.json")
+        meta_info.size = len(meta_bytes)
+        archive.addfile(meta_info, io.BytesIO(meta_bytes))
+
+        pred = np.array([0, 1], dtype=np.int64)
+        pred_buffer = io.BytesIO()
+        np.save(pred_buffer, pred, allow_pickle=False)
+        pred_bytes = pred_buffer.getvalue()
+        pred_info = tarfile.TarInfo(name="predict.npy")
+        pred_info.size = len(pred_bytes)
+        archive.addfile(pred_info, io.BytesIO(pred_bytes))
+
+        proba = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float64)
+        proba_buffer = io.BytesIO()
+        np.save(proba_buffer, proba, allow_pickle=False)
+        proba_bytes = proba_buffer.getvalue()
+        proba_info = tarfile.TarInfo(name="predict_proba.npy")
+        proba_info.size = len(proba_bytes)
+        archive.addfile(proba_info, io.BytesIO(proba_bytes))
+    return buffer.getvalue()
+
+
 def test_nicl_regression_native_parses_float_predictions(monkeypatch):
     monkeypatch.setenv("NEURALK_API_KEY", "secret")
     session = _CaptureSession({"predictions": [1.5, 2.5, 3.5]})
@@ -212,6 +263,35 @@ def test_nicl_regression_quantized_proxy_uses_train_only_binning(monkeypatch):
     assert "y_test" not in sent
     # quantized classes should be integer encoded
     assert all(isinstance(v, int) for v in sent["y_train"])
+
+
+def test_nicl_regression_quantized_proxy_tar_transport(monkeypatch):
+    monkeypatch.setenv("NEURALK_API_KEY", "secret")
+    session = _CaptureTarSession(_build_tar_response_payload())
+    adapter = NICLRegressionAdapter(
+        api_url="https://api.prediction.neuralk-ai.com/api/v1/inference",
+        timeout_seconds=1.0,
+        max_retries=1,
+        mode="quantized_proxy",
+        session=session,
+        proxy_num_classes=2,
+        min_samples_per_class=1,
+    )
+
+    y_train = np.array([0.0, 0.1, 0.2, 0.3], dtype=np.float64)
+    pred = adapter.fit_predict(
+        np.zeros((4, 3), dtype=np.float64),
+        y_train,
+        np.zeros((2, 3), dtype=np.float64),
+    )
+
+    assert pred.shape == (2,)
+    assert np.isfinite(pred).all()
+    sent = session.requests[0]
+    assert "data" in sent and isinstance(sent["data"], bytes)
+    assert "json" not in sent
+    assert sent["headers"]["Content-Type"] == "application/x-tar"
+    assert "X-Content-SHA256" in sent["headers"]
 
 
 def test_nicl_regression_rejects_invalid_proxy_num_classes_string():

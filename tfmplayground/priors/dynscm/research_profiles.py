@@ -468,6 +468,17 @@ def benchmark_contract_observed_temporal_cfg() -> DynSCMConfig:
     )
 
 
+@lru_cache(maxsize=1)
+def benchmark_contract_observed_temporal_bridge_cfg() -> DynSCMConfig:
+    return _benchmark_contract_base_cfg().with_overrides(
+        series_length_min=128,
+        series_length_max=256,
+        num_regimes=1,
+        sticky_rho=0.97,
+        drift_std=0.005,
+    )
+
+
 def _guardrailed(cfg: DynSCMConfig) -> DynSCMConfig:
     return cfg.with_overrides(enable_spectral_rescale=True, spectral_radius_cap=0.90)
 
@@ -1020,6 +1031,34 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
             shared_system_reuse_batches=4,
         ),
     )
+    integration_temporal_bridge_k4_safe_eval = replace(
+        integration_easy_stable_batch_k4_safe_eval,
+        name="integration_contract_temporal_bridge_k4_safe_eval",
+        train_source=_single_source(
+            benchmark_contract_observed_temporal_bridge_cfg(),
+            batch_shared_fields=COMMON_BATCH_SHARED_FIELDS,
+            share_system_within_batch=True,
+            shared_system_reuse_batches=4,
+            sample_filter=_learnability_filter(
+                min_informative_feature_count=8,
+                min_probe_train_r2=0.15,
+                max_probe_train_r2=0.99,
+            ),
+            max_sample_attempts_per_item=GUARDRAIL_MAX_SAMPLE_ATTEMPTS,
+        ),
+        val_source=_single_source(
+            benchmark_contract_observed_temporal_bridge_cfg(),
+            sample_filter=_learnability_filter(
+                min_informative_feature_count=8,
+                min_probe_train_r2=0.15,
+                max_probe_train_r2=0.995,
+            ),
+            max_sample_attempts_per_item=GUARDRAIL_MAX_SAMPLE_ATTEMPTS,
+            share_system_within_batch=False,
+            generation_exhaustion_policy="accept_last",
+        ),
+        max_seq_len=BENCHMARK_CONTRACT_MAX_SEQ_LEN,
+    )
     integration_temporal = replace(
         mode_ladder,
         name="integration_contract_temporal",
@@ -1056,6 +1095,7 @@ def research_profiles() -> dict[str, DynSCMLiveResearchProfile]:
             integration_easy_stable_batch,
             integration_easy_stable_batch_safe_eval,
             integration_easy_stable_batch_k4_safe_eval,
+            integration_temporal_bridge_k4_safe_eval,
             integration_temporal,
         )
     }

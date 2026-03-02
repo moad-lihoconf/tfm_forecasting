@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
+import json
 import os
+import tarfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 import numpy as np
 import requests
@@ -24,6 +29,12 @@ from .proxy_classification import (
 )
 
 _CRITICAL_EXCEPTIONS = (KeyboardInterrupt, SystemExit, MemoryError)
+_ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+
+try:  # pragma: no cover - optional dependency at runtime
+    import zstandard as _zstd  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover
+    _zstd = None
 
 __all__ = [
     "AdapterSkipError",
@@ -340,43 +351,26 @@ class NICLClientAdapter:
         num_classes: int,
     ) -> tuple[np.ndarray, np.ndarray]:
         token = _resolve_nicl_token(self.token_env)
-
         payload = {
             "task": "classification",
+            "model": "nicl-small",
             "x_train": np.asarray(x_train, dtype=np.float64).tolist(),
             "y_train": np.asarray(y_train, dtype=np.int64).tolist(),
             "x_test": np.asarray(x_test, dtype=np.float64).tolist(),
             "num_classes": num_classes,
         }
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        }
-
-        last_error: Exception | None = None
-        for attempt in range(self.max_retries):
-            try:
-                response = self.session.post(
-                    self.api_url,
-                    json=payload,
-                    headers=headers,
-                    timeout=self.timeout_seconds,
-                )
-                response.raise_for_status()
-                result = response.json()
-                pred, proba = _parse_nicl_classification_response(result)
-                if (
-                    pred.shape[0] != x_test.shape[0]
-                    or proba.shape[0] != x_test.shape[0]
-                ):
-                    raise ValueError("NICL response length does not match test size.")
-                return pred, proba
-            except Exception as exc:  # pragma: no cover
-                last_error = exc
-                if attempt + 1 < self.max_retries:
-                    time.sleep(0.5 * (2**attempt))
-
-        raise AdapterSkipError(f"NICL request failed after retries: {last_error}")
+        result = _nicl_post_json(
+            session=self.session,
+            url=self.api_url,
+            payload=payload,
+            token=token,
+            timeout_seconds=self.timeout_seconds,
+            max_retries=self.max_retries,
+        )
+        pred, proba = _parse_nicl_classification_response(result)
+        if pred.shape[0] != x_test.shape[0] or proba.shape[0] != x_test.shape[0]:
+            raise AdapterSkipError("NICL response length does not match test size.")
+        return pred, proba
 
 
 class NICLRegressionAdapter:
@@ -553,6 +547,179 @@ def _parse_nicl_regression_response(payload: dict[str, Any]) -> np.ndarray:
     return pred
 
 
+def _uses_nicl_tar_inference_protocol(url: str) -> bool:
+    path = urlparse(url).path.rstrip("/")
+    return path.endswith("/api/v1/inference")
+
+
+def _build_nicl_tar_request(payload: dict[str, Any]) -> bytes:
+    x_train = np.asarray(payload.get("x_train"), dtype=np.float32)
+    y_train_raw = np.asarray(payload.get("y_train"))
+    x_test = np.asarray(payload.get("x_test"), dtype=np.float32)
+    task = str(payload.get("task", "classification"))
+    model = str(payload.get("model", "nicl-small"))
+    num_classes = payload.get("num_classes")
+
+    if x_train.ndim != 2 or x_test.ndim != 2:
+        raise ValueError("NICL request expects 2D x_train and x_test arrays.")
+    if y_train_raw.ndim != 1:
+        raise ValueError("NICL request expects 1D y_train array.")
+    if x_train.shape[0] != y_train_raw.shape[0]:
+        raise ValueError("NICL request expects matching rows in x_train and y_train.")
+    if x_train.shape[1] != x_test.shape[1]:
+        raise ValueError("NICL request expects same feature count in train/test.")
+
+    y_train = (
+        np.asarray(y_train_raw, dtype=np.int64)
+        if task == "classification"
+        else np.asarray(y_train_raw, dtype=np.float32)
+    )
+
+    metadata_payload: dict[str, Any] = {"task": task}
+    if num_classes is not None:
+        metadata_payload["num_classes"] = int(num_classes)
+    metadata = {
+        "version": 1,
+        "method": "fit_predict",
+        "model": model,
+        "dataset": "tfmplayground_forecasting",
+        "prompter_config": None,
+        "memory_optimization": False,
+        "preprocess": True,
+        "metadata": metadata_payload,
+        "user": "",
+    }
+
+    tar_bytes = io.BytesIO()
+    with tarfile.open(fileobj=tar_bytes, mode="w") as archive:
+        _tar_add_json(archive, "metadata.json", metadata)
+        _tar_add_npy(archive, "X_train.npy", x_train)
+        _tar_add_npy(archive, "X_test.npy", x_test)
+        _tar_add_npy(archive, "y_train.npy", y_train)
+    tar_bytes.seek(0)
+    return tar_bytes.read()
+
+
+def _tar_add_json(archive: tarfile.TarFile, name: str, payload: dict[str, Any]) -> None:
+    _tar_add_bytes(archive, name, json.dumps(payload).encode("utf-8"))
+
+
+def _tar_add_npy(archive: tarfile.TarFile, name: str, array: np.ndarray) -> None:
+    buffer = io.BytesIO()
+    np.save(buffer, array, allow_pickle=False)
+    _tar_add_bytes(archive, name, buffer.getvalue())
+
+
+def _tar_add_bytes(archive: tarfile.TarFile, name: str, data: bytes) -> None:
+    info = tarfile.TarInfo(name=name)
+    info.size = len(data)
+    archive.addfile(info, io.BytesIO(data))
+
+
+def _parse_nicl_tar_response(response_bytes: bytes) -> dict[str, Any]:
+    try:
+        extracted = _extract_nicl_tar_payload(response_bytes)
+    except Exception:
+        maybe_json = json.loads(response_bytes.decode("utf-8"))
+        if isinstance(maybe_json, dict):
+            return maybe_json
+        raise
+
+    result: dict[str, Any] = {}
+    if "predictions" in extracted:
+        result["predictions"] = extracted["predictions"]
+    elif "predict" in extracted:
+        result["predictions"] = extracted["predict"]
+
+    if "probabilities" in extracted:
+        result["probabilities"] = extracted["probabilities"]
+    elif "predict_proba" in extracted:
+        result["probabilities"] = extracted["predict_proba"]
+
+    for key, value in extracted.items():
+        if key in {"predict", "predict_proba", "predictions", "probabilities"}:
+            continue
+        if key == "metadata" and isinstance(value, dict):
+            for nested_key, nested_value in value.items():
+                result.setdefault(nested_key, nested_value)
+        else:
+            result[key] = value
+    return result
+
+
+def _extract_nicl_tar_payload(response_bytes: bytes) -> dict[str, Any]:
+    if response_bytes.startswith(_ZSTD_MAGIC):
+        if _zstd is None:
+            raise RuntimeError(
+                "NICL response is zstd-compressed but zstandard is not available."
+            )
+        with _zstd.ZstdDecompressor().stream_reader(
+            io.BytesIO(response_bytes)
+        ) as reader:
+            decompressed = io.BytesIO(reader.read())
+        stream = decompressed
+    else:
+        stream = io.BytesIO(response_bytes)
+
+    extracted: dict[str, Any] = {}
+    with tarfile.open(fileobj=stream, mode="r:*") as archive:
+        for member in archive:
+            if not member.isfile():
+                continue
+            member_file = archive.extractfile(member)
+            if member_file is None:
+                continue
+            name = member.name
+            stem = name.rsplit(".", 1)[0]
+            payload = member_file.read()
+            if name.endswith(".npy"):
+                extracted[stem] = np.load(io.BytesIO(payload), allow_pickle=False)
+            elif name.endswith(".json"):
+                extracted[stem] = json.loads(payload.decode("utf-8"))
+            else:
+                extracted[name] = payload
+    return extracted
+
+
+def _nicl_post_tar(
+    *,
+    session: requests.Session,
+    url: str,
+    payload: dict[str, Any],
+    token: str,
+    timeout_seconds: float,
+    max_retries: int,
+) -> dict[str, Any]:
+    request_body = _build_nicl_tar_request(payload)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/x-tar",
+        "Accept": "application/x-tar",
+        "X-Content-SHA256": hashlib.sha256(request_body).hexdigest(),
+    }
+
+    last_error: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            response = session.post(
+                url,
+                data=request_body,
+                headers=headers,
+                timeout=timeout_seconds,
+            )
+            response.raise_for_status()
+            return _parse_nicl_tar_response(response.content)
+        except requests.HTTPError as exc:  # pragma: no cover
+            last_error = _rewrite_nicl_endpoint_error(exc)
+            if attempt + 1 < max_retries:
+                time.sleep(0.5 * (2**attempt))
+        except Exception as exc:  # pragma: no cover
+            last_error = exc
+            if attempt + 1 < max_retries:
+                time.sleep(0.5 * (2**attempt))
+    raise AdapterSkipError(f"NICL request failed after retries: {last_error}")
+
+
 def _nicl_post_json(
     *,
     session: requests.Session,
@@ -562,6 +729,16 @@ def _nicl_post_json(
     timeout_seconds: float,
     max_retries: int,
 ) -> dict[str, Any]:
+    if _uses_nicl_tar_inference_protocol(url):
+        return _nicl_post_tar(
+            session=session,
+            url=url,
+            payload=payload,
+            token=token,
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+        )
+
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -608,7 +785,45 @@ def _rewrite_nicl_endpoint_error(exc: requests.HTTPError) -> Exception:
             "Use NICL API endpoint "
             "'https://api.prediction.neuralk-ai.com/api/v1/inference' instead."
         )
+    if status_code >= 400:
+        detail = _extract_nicl_error_detail(response)
+        if detail:
+            return RuntimeError(
+                f"{status_code} from NICL API at {request_url}: {detail}"
+            )
     return exc
+
+
+def _extract_nicl_error_detail(response: requests.Response) -> str | None:
+    try:
+        payload = response.json()
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        detail = payload.get("detail")
+        if isinstance(detail, dict):
+            err = detail.get("error")
+            if isinstance(err, dict):
+                msg = err.get("message")
+                code = err.get("code")
+                req = err.get("request_id")
+                parts = []
+                if code is not None:
+                    parts.append(f"code={code}")
+                if msg:
+                    parts.append(str(msg))
+                if req:
+                    parts.append(f"request_id={req}")
+                if parts:
+                    return " | ".join(parts)
+            if detail:
+                return str(detail)
+        if detail:
+            return str(detail)
+    text = response.text.strip()
+    if text:
+        return text[:500]
+    return None
 
 
 def _resolve_nicl_token(token_env: str) -> str:
