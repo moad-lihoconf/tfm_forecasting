@@ -23,6 +23,75 @@ If you use Poetry:
 poetry install
 ```
 
+## How To Run (Local And Vertex)
+
+### Local Run (End-to-End)
+
+1. Generate a local DynSCM prior dump:
+
+```bash
+python -m tfmplayground.priors --lib dynscm \
+  --num_batches 1000 --batch_size 8 \
+  --max_seq_len 64 --max_features 128 \
+  --max_classes 0 \
+  --dynscm_workers 4 \
+  --dynscm_worker_blas_threads 1 \
+  --save_path workdir/dynscm_prior_64x128.h5
+```
+
+2. Train locally from the dump:
+
+```bash
+python pretrain_regression.py \
+  --priordump workdir/dynscm_prior_64x128.h5 \
+  --saveweights workdir/nanotabpfn_reg_weights.pth \
+  --savebuckets workdir/nanotabpfn_reg_buckets.pth
+```
+
+3. Run local benchmark:
+
+```bash
+python scripts/final_real_benchmark_standard_vs_nicl.py \
+  --mode full \
+  --output_dir workdir/forecast_results_standard_vs_nicl_py \
+  --max_series_per_dataset 8 \
+  --append_stats
+```
+
+### Vertex Run (End-to-End)
+
+1. Configure GCP and defaults:
+
+```bash
+gcloud auth login
+gcloud auth application-default login
+gcloud config set project <PROJECT_ID>
+gcloud config set ai/region <REGION>
+gcloud services enable aiplatform.googleapis.com storage.googleapis.com artifactregistry.googleapis.com
+export VERTEX_BUCKET=gs://<BUCKET_NAME>
+```
+
+2. Build and push GPU image:
+
+```bash
+bash scripts/update_docker_gpu.sh --push
+```
+
+3. Submit Vertex training:
+
+```bash
+bash scripts/submit_vertex_regression.sh \
+  --priordump gs://<BUCKET_NAME>/tfm_forecasting/priors/dynscm_prior.h5 \
+  --run-name vertex-reg-001
+```
+
+4. Sync run outputs locally:
+
+```bash
+bash scripts/sync_vertex_outputs.sh \
+  gs://<BUCKET_NAME>/tfm_forecasting/runs/vertex-reg-001
+```
+
 ## Docker GPU Image (For Vertex Jobs)
 
 The Vertex submission scripts expect a GPU training image from
@@ -233,15 +302,20 @@ Primary artifacts:
 - `workdir/forecast_results_standard_vs_nicl_py/status_counts_standard_vs_nicl.csv`
 - `workdir/forecast_results_standard_vs_nicl_py/regression_rows_standard_vs_nicl_plus_stats.csv`
 
-## Core Regression Files
+## Regression File Map
 
-- [pretrain_regression.py](/home/mouad/Desktop/dev_projects/tfm_forecasting/pretrain_regression.py)
-- [pretrain_regression_dynscm_live.py](/home/mouad/Desktop/dev_projects/tfm_forecasting/pretrain_regression_dynscm_live.py)
-- [tfmplayground/benchmarks/forecasting/adapters.py](/home/mouad/Desktop/dev_projects/tfm_forecasting/tfmplayground/benchmarks/forecasting/adapters.py)
-- [scripts/final_real_benchmark_standard_vs_nicl.py](/home/mouad/Desktop/dev_projects/tfm_forecasting/scripts/final_real_benchmark_standard_vs_nicl.py)
-- [scripts/check_forecast_final_ready.py](/home/mouad/Desktop/dev_projects/tfm_forecasting/scripts/check_forecast_final_ready.py)
-- [scripts/nicl_api_smoke.py](/home/mouad/Desktop/dev_projects/tfm_forecasting/scripts/nicl_api_smoke.py)
-- [scripts/update_docker_gpu.sh](/home/mouad/Desktop/dev_projects/tfm_forecasting/scripts/update_docker_gpu.sh)
-- [scripts/submit_vertex_regression.sh](/home/mouad/Desktop/dev_projects/tfm_forecasting/scripts/submit_vertex_regression.sh)
-- [scripts/submit_vertex_regression_dynscm_live.sh](/home/mouad/Desktop/dev_projects/tfm_forecasting/scripts/submit_vertex_regression_dynscm_live.sh)
-- [scripts/sync_vertex_outputs.sh](/home/mouad/Desktop/dev_projects/tfm_forecasting/scripts/sync_vertex_outputs.sh)
+- [pretrain_regression.py](/home/mouad/Desktop/dev_projects/tfm_forecasting/pretrain_regression.py): main local/GCS training entrypoint from a prior dump.
+- [pretrain_regression_dynscm_live.py](/home/mouad/Desktop/dev_projects/tfm_forecasting/pretrain_regression_dynscm_live.py): live DynSCM regression training entrypoint (no pre-generated dump required).
+- [tfmplayground/benchmarks/forecasting/adapters.py](/home/mouad/Desktop/dev_projects/tfm_forecasting/tfmplayground/benchmarks/forecasting/adapters.py): forecasting adapters and shared featurization logic, including NICL regression integration.
+- [scripts/final_real_benchmark_standard_vs_nicl.py](/home/mouad/Desktop/dev_projects/tfm_forecasting/scripts/final_real_benchmark_standard_vs_nicl.py): final benchmark runner used to generate `standard vs NICL` regression result tables.
+- [scripts/check_forecast_final_ready.py](/home/mouad/Desktop/dev_projects/tfm_forecasting/scripts/check_forecast_final_ready.py): preflight contract check for config, datasets, model files, and NICL endpoint/token before final run.
+- [scripts/nicl_api_smoke.py](/home/mouad/Desktop/dev_projects/tfm_forecasting/scripts/nicl_api_smoke.py): quick NICL connectivity/auth sanity test.
+- [configs/forecast_bench_final_3model.json](/home/mouad/Desktop/dev_projects/tfm_forecasting/configs/forecast_bench_final_3model.json): canonical final benchmark config (dataset/model/protocol contract).
+- [notebooks/final_real_benchmark_standard_vs_nicl.ipynb](/home/mouad/Desktop/dev_projects/tfm_forecasting/notebooks/final_real_benchmark_standard_vs_nicl.ipynb): analysis notebook for interpreting/exporting final regression benchmark outputs.
+- [scripts/update_docker_gpu.sh](/home/mouad/Desktop/dev_projects/tfm_forecasting/scripts/update_docker_gpu.sh): builds and optionally pushes the Vertex GPU training image.
+- [scripts/submit_vertex_regression.sh](/home/mouad/Desktop/dev_projects/tfm_forecasting/scripts/submit_vertex_regression.sh): submits Vertex custom job for regression training from a prior dump.
+- [scripts/submit_vertex_regression_dynscm_live.sh](/home/mouad/Desktop/dev_projects/tfm_forecasting/scripts/submit_vertex_regression_dynscm_live.sh): submits Vertex custom job for live DynSCM regression training.
+- [scripts/sync_vertex_outputs.sh](/home/mouad/Desktop/dev_projects/tfm_forecasting/scripts/sync_vertex_outputs.sh): syncs Vertex run artifacts from GCS back to `workdir/vertex_runs/...`.
+- [tests/test_forecast_final_preflight.py](/home/mouad/Desktop/dev_projects/tfm_forecasting/tests/test_forecast_final_preflight.py): regression tests for preflight checks and failure conditions.
+- [tests/test_forecast_bench_adapters.py](/home/mouad/Desktop/dev_projects/tfm_forecasting/tests/test_forecast_bench_adapters.py): regression tests for adapter behavior, leakage-safety assumptions, and NICL adapter modes.
+- [tests/test_dynscm_prior_analysis_scripts.py](/home/mouad/Desktop/dev_projects/tfm_forecasting/tests/test_dynscm_prior_analysis_scripts.py): regression tests for DynSCM prior analysis scripts used to validate benchmark alignment/invariants.
