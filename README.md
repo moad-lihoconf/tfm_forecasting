@@ -11,16 +11,26 @@ This repository documents and supports regression workflows only:
 
 Python `3.12` is expected.
 
+Preferred way: `Poetry` (recommended).
+
+```bash
+git clone https://github.com/moad-lihoconf/tfm_forecasting.git
+cd tfm_forecasting
+poetry install
+```
+
+If Poetry is not installed yet, use the official installer (not distro package):
+
+```bash
+curl -sSL https://install.python-poetry.org | python3 -
+```
+
+Optional fallback (without Poetry):
+
 ```bash
 git clone https://github.com/moad-lihoconf/tfm_forecasting.git
 cd tfm_forecasting
 pip install -e .
-```
-
-If you use Poetry:
-
-```bash
-poetry install
 ```
 
 ## How To Run (Local And Vertex)
