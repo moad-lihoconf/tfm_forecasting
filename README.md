@@ -176,6 +176,14 @@ Notes:
 
 ## DynSCM Prior Generation (Regression)
 
+Where to find the implemented prior:
+
+- Prior package root: [tfmplayground/priors/dynscm/](/home/mouad/Desktop/dev_projects/tfm_forecasting/tfmplayground/priors/dynscm)
+- Batch generator used by `--lib dynscm`: [tfmplayground/priors/dynscm/get_batch.py](/home/mouad/Desktop/dev_projects/tfm_forecasting/tfmplayground/priors/dynscm/get_batch.py)
+- Prior config schema: [tfmplayground/priors/dynscm/config.py](/home/mouad/Desktop/dev_projects/tfm_forecasting/tfmplayground/priors/dynscm/config.py)
+- Research profiles used for live training: [tfmplayground/priors/dynscm/research_profiles.py](/home/mouad/Desktop/dev_projects/tfm_forecasting/tfmplayground/priors/dynscm/research_profiles.py)
+- CLI entrypoint for dump generation: [tfmplayground/priors/main.py](/home/mouad/Desktop/dev_projects/tfm_forecasting/tfmplayground/priors/main.py)
+
 Generate a DynSCM dump:
 
 ```bash
