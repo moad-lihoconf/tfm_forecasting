@@ -8,6 +8,7 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 import numpy as np
 
@@ -58,9 +59,8 @@ def _run_check(name: str, fn: Callable[[], str]) -> CheckResult:
 
 def _check_config(cfg: ForecastBenchmarkConfig) -> str:
     if tuple(cfg.datasets.dataset_names) != FINAL_DATASETS:
-        raise ValueError(
-            f"dataset_names must be {FINAL_DATASETS}, got {tuple(cfg.datasets.dataset_names)}"
-        )
+        got_datasets = tuple(cfg.datasets.dataset_names)
+        raise ValueError(f"dataset_names must be {FINAL_DATASETS}, got {got_datasets}")
     if tuple(cfg.models.enabled_regression_models) != FINAL_MODELS:
         raise ValueError(
             "enabled_regression_models must be "
@@ -123,6 +123,7 @@ def _check_nicl(cfg: ForecastBenchmarkConfig, dotenv_values: dict[str, str]) -> 
     endpoint = cfg.models.nicl_regression_endpoint
     if not endpoint:
         raise ValueError("models.nicl_regression_endpoint must be set.")
+    _validate_nicl_endpoint(endpoint)
     env_name = cfg.models.nicl_api_key_env
     token = os.getenv(env_name) or os.getenv("NICL_API_TOKEN")
     source = env_name if os.getenv(env_name) else "NICL_API_TOKEN"
@@ -135,7 +136,27 @@ def _check_nicl(cfg: ForecastBenchmarkConfig, dotenv_values: dict[str, str]) -> 
         )
     budget = cfg.models.nicl_max_rows_budget
     budget_text = f", budget={budget}" if budget is not None else ""
-    return f"endpoint configured, token found via {source}{budget_text}"
+    return f"endpoint configured ({endpoint}), token found via {source}{budget_text}"
+
+
+def _validate_nicl_endpoint(endpoint: str) -> None:
+    parsed = urlparse(endpoint)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(
+            "models.nicl_regression_endpoint must be an absolute http(s) URL."
+        )
+    normalized = endpoint.rstrip("/")
+    if normalized == "https://prediction.neuralk-ai.com/predict":
+        raise ValueError(
+            "models.nicl_regression_endpoint points to dashboard URL "
+            "https://prediction.neuralk-ai.com/predict. "
+            "Use https://api.prediction.neuralk-ai.com/api/v1/inference instead."
+        )
+    if parsed.path.rstrip("/") != "/api/v1/inference":
+        raise ValueError(
+            "models.nicl_regression_endpoint must end with /api/v1/inference "
+            f"(got {parsed.path or '/'})."
+        )
 
 
 def _build_parser() -> argparse.ArgumentParser:

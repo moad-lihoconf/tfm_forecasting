@@ -259,6 +259,4 @@ def test_validate_generation_invariants_passes_for_easy_benchmark_profile() -> N
     assert invariants["sampling_support"]["num_vars_support"] == [2]
     assert invariants["sampling_support"]["n_train_support"] == [32]
     assert invariants["sampling_support"]["n_test_support"] == [16]
-    assert invariants["sampling_support"]["horizon_support"] == [1, 3, 6, 12]
-    assert invariants["sampling_support"]["n_test_support"] == [16]
-    assert invariants["sampling_support"]["horizon_support"] == [1, 3, 6, 12]
+    assert invariants["sampling_support"]["horizon_support"] == [1, 3]

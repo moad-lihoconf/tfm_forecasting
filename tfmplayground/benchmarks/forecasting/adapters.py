@@ -36,6 +36,13 @@ try:  # pragma: no cover - optional dependency at runtime
 except Exception:  # pragma: no cover
     _zstd = None
 
+try:  # pragma: no cover - optional dependency at runtime
+    from neuralk import (
+        NICLClassifier as _NICLClassifierSDK,  # type: ignore[import-not-found]
+    )
+except Exception:  # pragma: no cover
+    _NICLClassifierSDK = None
+
 __all__ = [
     "AdapterSkipError",
     "ForecastTable",
@@ -333,6 +340,8 @@ class NICLClientAdapter:
         timeout_seconds: float,
         max_retries: int,
         token_env: str = "NEURALK_API_KEY",
+        model_name: str = "nicl-small",
+        classifier_factory: Callable[..., Any] | None = None,
         session: requests.Session | None = None,
     ):
         self.name = "nicl_api"
@@ -340,6 +349,8 @@ class NICLClientAdapter:
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
         self.token_env = token_env
+        self.model_name = model_name
+        self._classifier_factory = classifier_factory
         self.session = session or requests.Session()
 
     def fit_predict_proba(
@@ -350,24 +361,17 @@ class NICLClientAdapter:
         *,
         num_classes: int,
     ) -> tuple[np.ndarray, np.ndarray]:
-        token = _resolve_nicl_token(self.token_env)
-        payload = {
-            "task": "classification",
-            "model": "nicl-small",
-            "x_train": np.asarray(x_train, dtype=np.float64).tolist(),
-            "y_train": np.asarray(y_train, dtype=np.int64).tolist(),
-            "x_test": np.asarray(x_test, dtype=np.float64).tolist(),
-            "num_classes": num_classes,
-        }
-        result = _nicl_post_json(
-            session=self.session,
-            url=self.api_url,
-            payload=payload,
-            token=token,
+        del num_classes
+        pred, proba = _nicl_sdk_fit_predict_proba(
+            x_train=x_train,
+            y_train=np.asarray(y_train, dtype=np.int64),
+            x_test=x_test,
+            api_url=self.api_url,
             timeout_seconds=self.timeout_seconds,
-            max_retries=self.max_retries,
+            token_env=self.token_env,
+            model_name=self.model_name,
+            classifier_factory=self._classifier_factory,
         )
-        pred, proba = _parse_nicl_classification_response(result)
         if pred.shape[0] != x_test.shape[0] or proba.shape[0] != x_test.shape[0]:
             raise AdapterSkipError("NICL response length does not match test size.")
         return pred, proba
@@ -387,6 +391,7 @@ class NICLRegressionAdapter:
         model_name: str = "nicl-small",
         proxy_num_classes: int | str = "auto",
         min_samples_per_class: int = 2,
+        classifier_factory: Callable[..., Any] | None = None,
         session: requests.Session | None = None,
     ):
         if mode not in {"native", "quantized_proxy"}:
@@ -402,6 +407,7 @@ class NICLRegressionAdapter:
             raise ValueError("proxy_num_classes must be an int or the string 'auto'.")
         self.proxy_num_classes = proxy_num_classes
         self.min_samples_per_class = min_samples_per_class
+        self._classifier_factory = classifier_factory
         self.session = session or requests.Session()
 
     def fit_predict(
@@ -460,39 +466,22 @@ class NICLRegressionAdapter:
                 min_samples_per_class=self.min_samples_per_class,
             )
             y_train_cls = transform_to_classes(y_train_arr, edges)
-        except Exception:
-            return self._fit_predict_native_or_train_mean(
-                x_train,
-                y_train_arr,
-                x_test,
-            )
+        except Exception as exc:
+            raise AdapterSkipError(
+                f"NICL quantized proxy binning failed: {exc}"
+            ) from exc
 
-        num_classes = edges.size - 1
-        token = _resolve_nicl_token(self.token_env)
-        payload = {
-            "task": "classification",
-            "model": self.model_name,
-            "x_train": np.asarray(x_train, dtype=np.float64).tolist(),
-            "y_train": np.asarray(y_train_cls, dtype=np.int64).tolist(),
-            "x_test": np.asarray(x_test, dtype=np.float64).tolist(),
-            "num_classes": num_classes,
-        }
-        try:
-            result = _nicl_post_json(
-                session=self.session,
-                url=self.api_url,
-                payload=payload,
-                token=token,
-                timeout_seconds=self.timeout_seconds,
-                max_retries=self.max_retries,
-            )
-            pred_cls, proba = _parse_nicl_classification_response(result)
-        except Exception:
-            return self._fit_predict_native_or_train_mean(
-                x_train,
-                y_train_arr,
-                x_test,
-            )
+        num_classes = int(edges.size - 1)
+        pred_cls, proba = _nicl_sdk_fit_predict_proba(
+            x_train=x_train,
+            y_train=y_train_cls,
+            x_test=x_test,
+            api_url=self.api_url,
+            timeout_seconds=self.timeout_seconds,
+            token_env=self.token_env,
+            model_name=self.model_name,
+            classifier_factory=self._classifier_factory,
+        )
 
         centers = _compute_train_bin_centers(y_train_arr, y_train_cls, num_classes)
         pred = _classification_outputs_to_regression(
@@ -507,20 +496,66 @@ class NICLRegressionAdapter:
             )
         return pred
 
-    def _fit_predict_native_or_train_mean(
-        self,
-        x_train: np.ndarray,
-        y_train: np.ndarray,
-        x_test: np.ndarray,
-    ) -> np.ndarray:
-        try:
-            return self._fit_predict_native(x_train, y_train, x_test)
-        except Exception:
-            # Keep benchmark coverage complete if NICL is temporarily unavailable.
-            train_mean = float(np.nanmean(y_train)) if y_train.size else 0.0
-            if not np.isfinite(train_mean):
-                train_mean = 0.0
-            return np.full((x_test.shape[0],), train_mean, dtype=np.float64)
+
+def _nicl_sdk_fit_predict_proba(
+    *,
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_test: np.ndarray,
+    api_url: str,
+    timeout_seconds: float,
+    token_env: str,
+    model_name: str,
+    classifier_factory: Callable[..., Any] | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    if api_url.rstrip("/") == "https://prediction.neuralk-ai.com/predict":
+        raise AdapterSkipError(
+            "405 Not Allowed at dashboard URL "
+            "'https://prediction.neuralk-ai.com/predict'. "
+            "Use NICL API endpoint "
+            "'https://api.prediction.neuralk-ai.com/api/v1/inference' instead."
+        )
+    token = _resolve_nicl_token(token_env)
+    classifier_cls = classifier_factory or _NICLClassifierSDK
+    if classifier_cls is None:
+        raise AdapterSkipError(
+            "neuralk SDK is unavailable; install `neuralk` to run NICL adapters."
+        )
+
+    timeout_s = max(1, int(np.ceil(float(timeout_seconds))))
+    x_train_arr = np.asarray(x_train, dtype=np.float64)
+    y_train_arr = np.asarray(y_train)
+    x_test_arr = np.asarray(x_test, dtype=np.float64)
+
+    try:
+        classifier = classifier_cls(
+            api_key=token,
+            host=api_url,
+            model=model_name,
+            timeout_s=timeout_s,
+        )
+        classifier.fit(x_train_arr, y_train_arr)
+        proba = np.asarray(classifier.predict_proba(x_test_arr), dtype=np.float64)
+    except _CRITICAL_EXCEPTIONS:
+        raise
+    except Exception as exc:  # pragma: no cover
+        raise AdapterSkipError(f"NICL SDK classification failed: {exc}") from exc
+
+    if proba.ndim == 1:
+        proba = proba[:, None]
+    if proba.shape[0] != x_test_arr.shape[0]:
+        raise AdapterSkipError(
+            "NICL SDK classification response shape mismatch: "
+            f"proba={proba.shape}, expected rows={x_test_arr.shape[0]}"
+        )
+
+    pred_idx = np.argmax(proba, axis=1)
+    classes = np.asarray(getattr(classifier, "classes_", []))
+    if classes.ndim == 1 and classes.size == proba.shape[1]:
+        pred = np.asarray(classes[pred_idx], dtype=np.int64).reshape(-1)
+    else:
+        pred = np.asarray(pred_idx, dtype=np.int64).reshape(-1)
+    return pred, proba
 
 
 def _parse_nicl_classification_response(
@@ -999,5 +1034,6 @@ def default_proxy_adapters(
             timeout_seconds=cfg.models.nicl_timeout_seconds,
             max_retries=cfg.models.nicl_max_retries,
             token_env=cfg.models.nicl_api_key_env,
+            model_name=cfg.models.nicl_model,
         ),
     }

@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import io
-import json
-import tarfile
 from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
 import pytest
-import requests
 import torch
 
 from tfmplayground.benchmarks.forecasting.adapters import (
@@ -109,6 +105,37 @@ def test_nicl_adapter_requires_token(monkeypatch):
         )
 
 
+class _FakeSDKClassifier:
+    instances: list[_FakeSDKClassifier] = []
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.fit_calls: list[tuple[np.ndarray, np.ndarray]] = []
+        self.classes_ = np.array([0, 1], dtype=np.int64)
+        type(self).instances.append(self)
+
+    def fit(self, x_train, y_train):
+        x_arr = np.asarray(x_train, dtype=np.float64)
+        y_arr = np.asarray(y_train, dtype=np.int64)
+        self.fit_calls.append((x_arr, y_arr))
+        classes = np.unique(y_arr).astype(np.int64, copy=False)
+        if classes.size < 2:
+            classes = np.array([0, 1], dtype=np.int64)
+        self.classes_ = classes
+        return self
+
+    def predict_proba(self, x_test):
+        x_arr = np.asarray(x_test, dtype=np.float64)
+        n_rows = x_arr.shape[0]
+        n_classes = max(1, int(self.classes_.size))
+        proba = np.zeros((n_rows, n_classes), dtype=np.float64)
+        proba[:, 0] = 1.0
+        if n_rows > 1 and n_classes > 1:
+            proba[-1, 0] = 0.0
+            proba[-1, -1] = 1.0
+        return proba
+
+
 class _FakeResponse:
     def __init__(self, payload):
         self._payload = payload
@@ -120,23 +147,14 @@ class _FakeResponse:
         return self._payload
 
 
-class _FakeSession:
-    def post(self, *args, **kwargs):
-        return _FakeResponse(
-            {
-                "probabilities": [[0.8, 0.2], [0.3, 0.7]],
-                "predictions": [0, 1],
-            }
-        )
-
-
 def test_nicl_adapter_parses_response(monkeypatch):
     monkeypatch.setenv("NEURALK_API_KEY", "secret")
+    _FakeSDKClassifier.instances.clear()
     adapter = NICLClientAdapter(
-        api_url="https://example.com",
+        api_url="https://example.com/api/v1/inference",
         timeout_seconds=1.0,
         max_retries=1,
-        session=_FakeSession(),
+        classifier_factory=_FakeSDKClassifier,
     )
 
     pred, proba = adapter.fit_predict_proba(
@@ -147,6 +165,10 @@ def test_nicl_adapter_parses_response(monkeypatch):
     )
     assert pred.shape == (2,)
     assert proba.shape == (2, 2)
+    assert len(_FakeSDKClassifier.instances) == 1
+    instance = _FakeSDKClassifier.instances[0]
+    assert instance.kwargs["api_key"] == "secret"
+    assert instance.kwargs["host"] == "https://example.com/api/v1/inference"
 
 
 class _CaptureSession:
@@ -157,53 +179,6 @@ class _CaptureSession:
     def post(self, *args, **kwargs):
         self.requests.append(kwargs.get("json", {}))
         return _FakeResponse(self.payload)
-
-
-class _FakeBinaryResponse:
-    def __init__(self, payload: bytes, *, status_code: int = 200, url: str = ""):
-        self.content = payload
-        self.status_code = status_code
-        self.url = url
-
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            raise requests.HTTPError(f"{self.status_code} client error", response=self)
-
-
-class _CaptureTarSession:
-    def __init__(self, payload: bytes):
-        self.payload = payload
-        self.requests = []
-
-    def post(self, url, *args, **kwargs):
-        self.requests.append(kwargs)
-        return _FakeBinaryResponse(self.payload, status_code=200, url=url)
-
-
-def _build_tar_response_payload() -> bytes:
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w") as archive:
-        meta_bytes = json.dumps({"latency_ms": 12}).encode("utf-8")
-        meta_info = tarfile.TarInfo(name="metadata.json")
-        meta_info.size = len(meta_bytes)
-        archive.addfile(meta_info, io.BytesIO(meta_bytes))
-
-        pred = np.array([0, 1], dtype=np.int64)
-        pred_buffer = io.BytesIO()
-        np.save(pred_buffer, pred, allow_pickle=False)
-        pred_bytes = pred_buffer.getvalue()
-        pred_info = tarfile.TarInfo(name="predict.npy")
-        pred_info.size = len(pred_bytes)
-        archive.addfile(pred_info, io.BytesIO(pred_bytes))
-
-        proba = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float64)
-        proba_buffer = io.BytesIO()
-        np.save(proba_buffer, proba, allow_pickle=False)
-        proba_bytes = proba_buffer.getvalue()
-        proba_info = tarfile.TarInfo(name="predict_proba.npy")
-        proba_info.size = len(proba_bytes)
-        archive.addfile(proba_info, io.BytesIO(proba_bytes))
-    return buffer.getvalue()
 
 
 def test_nicl_regression_native_parses_float_predictions(monkeypatch):
@@ -228,21 +203,13 @@ def test_nicl_regression_native_parses_float_predictions(monkeypatch):
 
 def test_nicl_regression_quantized_proxy_uses_train_only_binning(monkeypatch):
     monkeypatch.setenv("NEURALK_API_KEY", "secret")
-    session = _CaptureSession(
-        {
-            "probabilities": [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-            "predictions": [0, 3],
-        }
-    )
+    _FakeSDKClassifier.instances.clear()
     adapter = NICLRegressionAdapter(
         api_url="https://example.com/cls",
         timeout_seconds=1.0,
         max_retries=1,
         mode="quantized_proxy",
-        session=session,
+        classifier_factory=_FakeSDKClassifier,
         proxy_num_classes="auto",
         min_samples_per_class=1,
     )
@@ -254,99 +221,47 @@ def test_nicl_regression_quantized_proxy_uses_train_only_binning(monkeypatch):
     )
     assert pred.shape == (2,)
     assert np.isfinite(pred).all()
-    sent = session.requests[0]
-    assert sent["task"] == "classification"
-    assert "y_train" in sent
-    assert sent["num_classes"] >= 2
-    assert sent["num_classes"] <= len(y_train)
-    # no y_test leakage should ever be sent
-    assert "y_test" not in sent
-    # quantized classes should be integer encoded
-    assert all(isinstance(v, int) for v in sent["y_train"])
+    assert len(_FakeSDKClassifier.instances) == 1
+    instance = _FakeSDKClassifier.instances[0]
+    assert instance.fit_calls
+    _, fit_y = instance.fit_calls[0]
+    assert fit_y.dtype == np.int64
+    assert np.all(fit_y == fit_y.astype(np.int64))
+    assert instance.kwargs["host"] == "https://example.com/cls"
+    assert instance.kwargs["model"] == "nicl-small"
 
 
-def test_nicl_regression_quantized_proxy_tar_transport(monkeypatch):
-    monkeypatch.setenv("NEURALK_API_KEY", "secret")
-    session = _CaptureTarSession(_build_tar_response_payload())
-    adapter = NICLRegressionAdapter(
-        api_url="https://api.prediction.neuralk-ai.com/api/v1/inference",
-        timeout_seconds=1.0,
-        max_retries=1,
-        mode="quantized_proxy",
-        session=session,
-        proxy_num_classes=2,
-        min_samples_per_class=1,
-    )
-
-    y_train = np.array([0.0, 0.1, 0.2, 0.3], dtype=np.float64)
-    pred = adapter.fit_predict(
-        np.zeros((4, 3), dtype=np.float64),
-        y_train,
-        np.zeros((2, 3), dtype=np.float64),
-    )
-
-    assert pred.shape == (2,)
-    assert np.isfinite(pred).all()
-    sent = session.requests[0]
-    assert "data" in sent and isinstance(sent["data"], bytes)
-    assert "json" not in sent
-    assert sent["headers"]["Content-Type"] == "application/x-tar"
-    assert "X-Content-SHA256" in sent["headers"]
-
-
-def test_nicl_regression_quantized_proxy_falls_back_to_native_on_binning_failure(
-    monkeypatch,
-):
+def test_nicl_regression_quantized_proxy_raises_on_binning_failure(monkeypatch):
     monkeypatch.setenv("NEURALK_API_KEY", "secret")
 
-    class _TaskAwareSession:
-        def __init__(self):
-            self.requests = []
-
-        def post(self, *args, **kwargs):
-            payload = kwargs.get("json", {})
-            self.requests.append(payload)
-            if payload.get("task") == "regression":
-                return _FakeResponse({"predictions": [1.25, 1.75]})
-            return _FakeResponse(
-                {
-                    "probabilities": [[1.0, 0.0], [0.0, 1.0]],
-                    "predictions": [0, 1],
-                }
-            )
-
-    session = _TaskAwareSession()
     adapter = NICLRegressionAdapter(
         api_url="https://example.com/cls",
         timeout_seconds=1.0,
         max_retries=1,
         mode="quantized_proxy",
-        session=session,
+        classifier_factory=_FakeSDKClassifier,
         proxy_num_classes=4,
         min_samples_per_class=1,
     )
 
     # Constant labels make quantile classes collapse.
     y_train = np.ones((6,), dtype=np.float64)
-    pred = adapter.fit_predict(
-        np.zeros((6, 3), dtype=np.float64),
-        y_train,
-        np.zeros((2, 3), dtype=np.float64),
-    )
-
-    assert pred.shape == (2,)
-    assert np.allclose(pred, [1.25, 1.75])
-    assert len(session.requests) == 1
-    assert session.requests[0]["task"] == "regression"
+    with pytest.raises(AdapterSkipError, match="binning failed"):
+        adapter.fit_predict(
+            np.zeros((6, 3), dtype=np.float64),
+            y_train,
+            np.zeros((2, 3), dtype=np.float64),
+        )
 
 
-def test_nicl_regression_quantized_proxy_falls_back_to_train_mean_if_native_fails(
-    monkeypatch,
-):
+def test_nicl_regression_quantized_proxy_raises_if_sdk_call_fails(monkeypatch):
     monkeypatch.setenv("NEURALK_API_KEY", "secret")
 
-    class _AlwaysFailSession:
-        def post(self, *args, **kwargs):
+    class _BrokenSDKClassifier:
+        def __init__(self, **kwargs):
+            pass
+
+        def fit(self, x_train, y_train):
             raise RuntimeError("network down")
 
     adapter = NICLRegressionAdapter(
@@ -354,20 +269,18 @@ def test_nicl_regression_quantized_proxy_falls_back_to_train_mean_if_native_fail
         timeout_seconds=1.0,
         max_retries=1,
         mode="quantized_proxy",
-        session=_AlwaysFailSession(),
+        classifier_factory=_BrokenSDKClassifier,
         proxy_num_classes=4,
         min_samples_per_class=1,
     )
 
-    y_train = np.ones((6,), dtype=np.float64) * 3.5
-    pred = adapter.fit_predict(
-        np.zeros((6, 3), dtype=np.float64),
-        y_train,
-        np.zeros((2, 3), dtype=np.float64),
-    )
-
-    assert pred.shape == (2,)
-    assert np.allclose(pred, [3.5, 3.5])
+    y_train = np.linspace(0.0, 1.0, 8, dtype=np.float64)
+    with pytest.raises(AdapterSkipError, match="SDK classification failed"):
+        adapter.fit_predict(
+            np.zeros((8, 3), dtype=np.float64),
+            y_train,
+            np.zeros((2, 3), dtype=np.float64),
+        )
 
 
 def test_nicl_regression_rejects_invalid_proxy_num_classes_string():

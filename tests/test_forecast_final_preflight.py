@@ -27,7 +27,9 @@ class _FakeCfg:
     class _Models:
         enabled_regression_models = preflight_mod.FINAL_MODELS
         nicl_regression_mode = "quantized_proxy"
-        nicl_regression_endpoint = "https://example.com/predict"
+        nicl_regression_endpoint = (
+            "https://api.prediction.neuralk-ai.com/api/v1/inference"
+        )
         nicl_api_key_env = "NEURALK_API_KEY"
         nicl_max_rows_budget = 100
         model_dynscm_ckpt = "dyn.pth"
@@ -71,6 +73,17 @@ def test_check_nicl_accepts_token_from_dotenv(monkeypatch: pytest.MonkeyPatch):
         {"NEURALK_API_KEY": "secret"},
     )
     assert "token found" in detail
+
+
+def test_check_nicl_rejects_dashboard_predict_endpoint():
+    class _Cfg(_FakeCfg):
+        class _Models(_FakeCfg._Models):
+            nicl_regression_endpoint = "https://prediction.neuralk-ai.com/predict"
+
+        models = _Models()
+
+    with pytest.raises(ValueError, match="dashboard URL"):
+        preflight_mod._check_nicl(_Cfg(), {"NEURALK_API_KEY": "secret"})
 
 
 def test_main_exits_success_when_all_checks_pass(
