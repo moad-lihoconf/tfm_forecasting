@@ -51,7 +51,7 @@ class NanoTabPFNModel(nn.Module):
             x = args[0]
             if args[2] is not None:
                 x = torch.cat((x, args[2]), dim=1)
-            return self._forward((x, args[1]), single_eval_pos=len(args[0]), **kwargs)
+            return self._forward((x, args[1]), single_eval_pos=args[0].shape[1], **kwargs)
         elif len(args) == 1 and isinstance(args, tuple):
             # case model((x,y), single_eval_pos=None)
             return self._forward(*args, **kwargs)
