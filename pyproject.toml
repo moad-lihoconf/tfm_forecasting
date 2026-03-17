@@ -30,7 +30,9 @@ dependencies = [
     "tabpfn-v1-prior @ git+https://github.com/automl/tabpfn-v1-prior.git",
     "interpret",
     "numba",
-    "mlflow"
+    "mlflow",
+    "xgboost",
+    "wandb",
 ]
 
 [project.optional-dependencies]
