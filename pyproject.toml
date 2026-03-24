@@ -25,14 +25,12 @@ dependencies = [
     "schedulefree>=1.4",
     "pfns==0.3.0",
     "openml==0.15.1",
-    "tabicl",
+    "tabicl[pretrain]",
     "ticl @ git+https://github.com/microsoft/ticl.git@main",
     "tabpfn-v1-prior @ git+https://github.com/automl/tabpfn-v1-prior.git",
     "interpret",
     "numba",
     "mlflow",
-    "xgboost",
-    "wandb",
 ]
 
 [project.optional-dependencies]
